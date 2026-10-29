@@ -147,3 +147,20 @@ vite.config.ts.timestamp-*
 
 # Turbo Repo
 .turbo
+
+# Dependencias y compilados en cualquier subcarpeta
+node_modules/
+dist/
+build/
+.cloudflare/
+.wrangler/
+
+# Variables de entorno y secretos (CRÍTICO: nunca subir a Git)
+.env
+.env.*
+!.env.example
+
+# Archivos de sistema y editores
+.DS_Store
+Thumbs.db
+*.log
