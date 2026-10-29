@@ -1,0 +1,285 @@
+// =====================================================================
+// PetFlow - DEMO Módulo de Ventas (CUB 1.1, 1.2, 1.4 + Login 6.1)
+// Nombres de modelos y campos en PascalCase/camelCase; nombres físicos
+// en snake_case mediante @map y @@map.
+// =====================================================================
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum RolUsuario {
+  VENDEDOR
+  GESTOR_COMERCIAL
+  GERENTE
+
+  @@map("rol_usuario")
+}
+
+enum EstadoRegistro {
+  ACTIVO
+  INACTIVO
+
+  @@map("estado_registro")
+}
+
+enum EstadoCaja {
+  ABIERTA
+  CERRADA
+
+  @@map("estado_caja")
+}
+
+enum FormatoVenta {
+  UNIDAD
+  GRANEL
+
+  @@map("formato_venta")
+}
+
+enum TipoMedioPago {
+  EFECTIVO
+  TRANSFERENCIA
+  TARJETA
+  BILLETERA_VIRTUAL
+
+  @@map("tipo_medio_pago")
+}
+
+enum OrigenVenta {
+  MOSTRADOR
+  DIGITAL
+
+  @@map("origen_venta")
+}
+
+enum ModalidadEntrega {
+  RETIRO
+  ENVIO
+
+  @@map("modalidad_entrega")
+}
+
+// COMPLETADA: tiene ticket, pago registrado e impacto en caja
+// PENDIENTE_PAGO: fiado, descontó stock y tiene detalles, sin ticket ni impacto en caja
+// ANULADA: baja lógica, revirtió stock (y caja si ya estaba COMPLETADA)
+enum EstadoVenta {
+  COMPLETADA
+  PENDIENTE_PAGO
+  ANULADA
+
+  @@map("estado_venta")
+}
+
+enum EstadoCambio {
+  ACTIVO
+  ANULADO
+
+  @@map("estado_cambio")
+}
+
+// 1. SEGURIDAD Y CAJA
+model Usuario {
+  idUsuario    Int            @id @default(autoincrement()) @map("id_usuario")
+  username     String         @unique @db.VarChar(50)
+  nombre       String         @db.VarChar(50)
+  rol          RolUsuario
+  passwordHash String         @map("password_hash") @db.VarChar(255)
+  estado       EstadoRegistro @default(ACTIVO)
+
+  sesionesCaja SesionCaja[]
+  ventas       Venta[]
+  cambios      CambioMercaderia[]
+
+  @@map("usuarios")
+}
+
+model SesionCaja {
+  idCaja        Int        @id @default(autoincrement()) @map("id_caja")
+  idUsuario     Int        @map("id_usuario")
+  fechaApertura DateTime   @default(now()) @map("fecha_apertura") @db.Timestamptz(6)
+  fechaCierre   DateTime?  @map("fecha_cierre") @db.Timestamptz(6)
+  saldoActual   Decimal    @default(0.00) @map("saldo_actual") @db.Decimal(12, 2)
+  estado        EstadoCaja @default(ABIERTA)
+
+  usuario  Usuario @relation(fields: [idUsuario], references: [idUsuario])
+  ventas   Venta[]
+  cambios  CambioMercaderia[]
+
+  @@map("sesiones_caja")
+}
+
+// 2. CATÁLOGO BASE
+model Categoria {
+  idCategoria Int                 @id @default(autoincrement()) @map("id_categoria")
+  nombre      String              @db.VarChar(50)
+
+  productos   Producto[]
+  atributos   CategoriaAtributo[]
+
+  @@map("categorias")
+}
+
+model CategoriaAtributo {
+  idAtributo    Int       @id @default(autoincrement()) @map("id_atributo")
+  idCategoria   Int       @map("id_categoria")
+  clave         String    @db.VarChar(50)
+  opciones      Json?     @db.JsonB
+  nombreAtributo String   @map("nombre_atributo") @db.VarChar(50)
+  tipoDato      String    @map("tipo_dato") @db.VarChar(20)
+  esRequerido   Boolean   @default(false) @map("es_requerido")
+
+  categoria Categoria @relation(fields: [idCategoria], references: [idCategoria])
+
+  @@map("categoria_atributos")
+}
+
+model Producto {
+  idProducto       Int            @id @default(autoincrement()) @map("id_producto")
+  idCategoria      Int            @map("id_categoria")
+  atributosExtra   String?        @map("atributos_extra")
+  codigoBarras     String?        @unique @map("codigo_barras") @db.VarChar(50)
+  nombre           String         @db.VarChar(100)
+  formatoVenta     FormatoVenta   @map("formato_venta")
+  costoActual      Decimal        @map("costo_actual") @db.Decimal(10, 2)
+  precioVenta      Decimal        @map("precio_venta") @db.Decimal(10, 2)
+  stockFisico      Decimal        @default(0.000) @map("stock_fisico") @db.Decimal(10, 3)
+  idProductoGranel Int?           @map("id_producto_granel")
+  estado           EstadoRegistro @default(ACTIVO)
+
+  categoria             Categoria          @relation(fields: [idCategoria], references: [idCategoria])
+  productoGranel        Producto?          @relation("ProductoGranel", fields: [idProductoGranel], references: [idProducto])
+  productosFraccionados Producto[]         @relation("ProductoGranel")
+  detallesVenta         DetalleVenta[]
+  cambiosDevueltos      CambioMercaderia[] @relation("CambioProductoDevuelto")
+  cambiosStockIngresado CambioMercaderia[] @relation("CambioProductoStockIngresado")
+  cambiosEntregados     CambioMercaderia[] @relation("CambioProductoEntregado")
+
+  @@map("productos")
+}
+
+model MedioPago {
+  idMedioPago       Int            @id @default(autoincrement()) @map("id_medio_pago")
+  nombre            String         @db.VarChar(50)
+  tipo              TipoMedioPago
+  porcentajeRecargo Decimal        @default(0.00) @map("porcentaje_recargo") @db.Decimal(5, 2)
+  porcentajeDescuento Decimal      @default(0.00) @map("porcentaje_descuento") @db.Decimal(5, 2)
+  estado            EstadoRegistro @default(ACTIVO)
+
+  pagos    PagoVenta[]
+  cambios  CambioMercaderia[]
+
+  @@map("medios_pago")
+}
+
+// 3. NÚCLEO TRANSACCIONAL DE VENTAS
+model Venta {
+  idVenta           Int              @id @default(autoincrement()) @map("id_venta")
+  // Nullable: fiados no tienen ticket hasta que se cobran
+  numeroComprobante String?          @unique @map("numero_comprobante") @db.VarChar(30)
+  fechaHora         DateTime         @default(now()) @map("fecha_hora") @db.Timestamptz(6)
+  // Nulo si es fiado; se completa al cobrar
+  fechaHoraPago     DateTime?        @map("fecha_hora_pago") @db.Timestamptz(6)
+  origen            OrigenVenta
+  modalidadEntrega  ModalidadEntrega @map("modalidad_entrega")
+  clienteReferencia String?          @map("cliente_referencia") @db.VarChar(100)
+  subtotalBruto     Decimal          @map("subtotal_bruto") @db.Decimal(12, 2)
+  descuentoManual   Decimal          @default(0.00) @map("descuento_manual") @db.Decimal(10, 2)
+  montoTotal        Decimal          @map("monto_total") @db.Decimal(12, 2)
+  estado            EstadoVenta      @default(COMPLETADA)
+  idUsuario         Int              @map("id_usuario")
+  // Nulo mientras el fiado no se cobra
+  idCaja            Int?             @map("id_caja")
+
+  usuario  Usuario      @relation(fields: [idUsuario], references: [idUsuario])
+  caja     SesionCaja?  @relation(fields: [idCaja], references: [idCaja])
+  pagos    PagoVenta[]
+  detalles DetalleVenta[]
+  cambiosOriginados CambioMercaderia[]
+
+  @@index([fechaHora])
+  @@index([estado])
+  @@index([idCaja])
+  @@index([clienteReferencia])
+  @@map("ventas")
+}
+
+// Vacía mientras la venta está en PENDIENTE_PAGO
+model PagoVenta {
+  idPagoVenta         Int      @id @default(autoincrement()) @map("id_pago_venta")
+  idVenta             Int      @map("id_venta")
+  idMedioPago         Int      @map("id_medio_pago")
+  montoBase           Decimal  @map("monto_base") @db.Decimal(12, 2)
+  porcentajeAplicado  Decimal  @default(0.00) @map("porcentaje_aplicado") @db.Decimal(5, 2)
+  montoFinal          Decimal  @map("monto_final") @db.Decimal(12, 2)
+  montoRecibido       Decimal? @map("monto_recibido") @db.Decimal(12, 2)
+  vuelto              Decimal? @db.Decimal(12, 2)
+
+  venta      Venta     @relation(fields: [idVenta], references: [idVenta])
+  medioPago  MedioPago @relation(fields: [idMedioPago], references: [idMedioPago])
+
+  @@unique([idVenta, idMedioPago])
+  @@map("pagos_venta")
+}
+
+// Siempre guarda los productos que salieron del local (cobrados o fiados)
+model DetalleVenta {
+  idDetalle              Int     @id @default(autoincrement()) @map("id_detalle")
+  idVenta                Int     @map("id_venta")
+  idProducto             Int     @map("id_producto")
+  cantidad               Decimal @db.Decimal(10, 3)
+  precioUnitarioVigente  Decimal @map("precio_unitario_vigente") @db.Decimal(10, 2)
+  costoUnitarioCongelado Decimal @map("costo_unitario_congelado") @db.Decimal(10, 2)
+  subtotal               Decimal @db.Decimal(12, 2)
+
+  venta    Venta    @relation(fields: [idVenta], references: [idVenta])
+  producto Producto @relation(fields: [idProducto], references: [idProducto])
+
+  @@index([idVenta])
+  @@index([idProducto])
+  @@map("detalles_venta")
+}
+
+// 4. CAMBIOS DE MERCADERÍA
+model CambioMercaderia {
+  idCambio                        Int          @id @default(autoincrement()) @map("id_cambio")
+  fechaHora                       DateTime     @default(now()) @map("fecha_hora") @db.Timestamptz(6)
+  idVentaOriginal                 Int?         @map("id_venta_original")
+  idUsuario                       Int          @map("id_usuario")
+  idCaja                          Int          @map("id_caja")
+
+  // Artículo que entra (devuelto por el cliente)
+  idProductoDevuelto              Int          @map("id_producto_devuelto")
+  cantidadDevuelta                Decimal      @map("cantidad_devuelta") @db.Decimal(10, 3)
+  esBolsaAbierta                  Boolean      @default(false) @map("es_bolsa_abierta")
+  precioUnitarioDevuelto          Decimal      @map("precio_unitario_devuelto") @db.Decimal(10, 2)
+  idProductoStockIngresado        Int          @map("id_producto_stock_ingresado")
+
+  // Artículo que sale (entregado al cliente)
+  idProductoEntregado             Int          @map("id_producto_entregado")
+  cantidadEntregada               Decimal      @map("cantidad_entregada") @db.Decimal(10, 3)
+  precioUnitarioEntregado         Decimal      @map("precio_unitario_entregado") @db.Decimal(10, 2)
+  costoUnitarioCongeladoEntregado Decimal      @map("costo_unitario_congelado_entregado") @db.Decimal(10, 2)
+
+  // Diferencia económica (>= 0, sin reembolso)
+  saldoResultante                 Decimal      @default(0.00) @map("saldo_resultante") @db.Decimal(10, 2)
+  idMedioPago                     Int?         @map("id_medio_pago")
+  estado                          EstadoCambio @default(ACTIVO)
+
+  ventaOriginal     Venta?      @relation(fields: [idVentaOriginal], references: [idVenta])
+  usuario           Usuario     @relation(fields: [idUsuario], references: [idUsuario])
+  caja              SesionCaja  @relation(fields: [idCaja], references: [idCaja])
+  productoDevuelto  Producto    @relation("CambioProductoDevuelto", fields: [idProductoDevuelto], references: [idProducto])
+  productoStockIngresado Producto @relation("CambioProductoStockIngresado", fields: [idProductoStockIngresado], references: [idProducto])
+  productoEntregado Producto    @relation("CambioProductoEntregado", fields: [idProductoEntregado], references: [idProducto])
+  medioPago         MedioPago?  @relation(fields: [idMedioPago], references: [idMedioPago])
+
+  @@index([fechaHora])
+  @@index([idVentaOriginal])
+  @@map("cambios_mercaderia")
+}
