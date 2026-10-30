@@ -1,5 +1,5 @@
 import type { Request, Response } from "express";
-import { VentaError } from "./ventas.errors.js";
+import { esErrorNegocio } from "./ventas.errors.js";
 import { registrarVentaSchema } from "./ventas.schemas.js";
 import { registrarVenta } from "./ventas.service.js";
 
@@ -9,7 +9,7 @@ import { registrarVenta } from "./ventas.service.js";
  * Handler de `POST /ventas`.
  * Valida el body y delega en el service. No contiene reglas de negocio.
  * Respuestas: 201 si se registra; 400 con detalle por campo si el body es inválido;
- * el código de `VentaError` (400/404/409) si falla una regla de negocio.
+ * el código del error de negocio (400/404/409) si falla una regla de negocio.
  */
 export async function postRegistrarVenta(req: Request, res: Response): Promise<void> {
   // safeParse no lanza: permite responder el detalle de cada campo inválido
@@ -29,12 +29,13 @@ export async function postRegistrarVenta(req: Request, res: Response): Promise<v
   try {
     const resultado = await registrarVenta(parseo.data);
     res.status(201).json(resultado);
-  } catch (error) {
-    // Los errores de negocio se traducen a su código HTTP; cualquier otro (BD caída, bug) sube a Express
-    if (error instanceof VentaError) {
-      res.status(error.status).json({ exito: false, mensaje: error.message });
+  } catch (errorCapturado) {
+    // Los errores de negocio (objetos puros) se traducen a su código HTTP;
+    // cualquier otro valor (BD caída, bug) no pasa la guarda y sube a Express
+    if (esErrorNegocio(errorCapturado)) {
+      res.status(errorCapturado.status).json({ exito: false, mensaje: errorCapturado.mensaje });
       return;
     }
-    throw error;
+    throw errorCapturado;
   }
 }

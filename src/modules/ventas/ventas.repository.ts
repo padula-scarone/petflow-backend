@@ -1,5 +1,5 @@
 import { prisma } from "../../shared/prisma.js";
-import { StockInsuficienteError, VentaError } from "./ventas.errors.js";
+import { crearErrorNegocio, crearErrorStockInsuficiente } from "./ventas.errors.js";
 import type {
   EstadoVenta,
   MedioPagoVigente,
@@ -35,8 +35,8 @@ type CalcularVenta = (
  * @param input Cuerpo validado de la venta.
  * @param calcular Cálculo de negocio, ejecutado dentro de la transacción con datos recién leídos.
  * @returns Los datos de la venta persistida.
- * @throws {VentaError} Usuario inexistente o inactivo, o no hay caja abierta.
- * @throws {StockInsuficienteError} Si otra venta consumió el stock antes de descontarlo.
+ * @throws {ErrorNegocio} Usuario inexistente o inactivo (404/400), no hay caja abierta (409) o
+ * otra venta consumió el stock antes de descontarlo (409). Se lanza como objeto puro, no como Error.
  */
 export async function registrarVentaAtomica(
   input: RegistrarVentaInput,
@@ -49,10 +49,10 @@ export async function registrarVentaAtomica(
       select: { estado: true },
     });
     if (!usuario) {
-      throw new VentaError(`El usuario ${input.idUsuario} no existe`, 404);
+      throw crearErrorNegocio(`El usuario ${input.idUsuario} no existe`, 404);
     }
     if (usuario.estado !== "ACTIVO") {
-      throw new VentaError(`El usuario ${input.idUsuario} está inactivo`, 400);
+      throw crearErrorNegocio(`El usuario ${input.idUsuario} está inactivo`, 400);
     }
 
     // --- LECTURA Y CÁLCULO ---
@@ -92,7 +92,7 @@ export async function registrarVentaAtomica(
         select: { idCaja: true },
       });
       if (!caja) {
-        throw new VentaError("No hay una caja abierta para registrar la venta", 409);
+        throw crearErrorNegocio("No hay una caja abierta para registrar la venta", 409);
       }
       idCaja = caja.idCaja;
     }
@@ -107,7 +107,7 @@ export async function registrarVentaAtomica(
         data: { stockFisico: { decrement: cantidad } },
       });
       if (actualizados.count !== 1) {
-        throw new StockInsuficienteError(linea.idProducto);
+        throw crearErrorStockInsuficiente(linea.idProducto);
       }
     }
 

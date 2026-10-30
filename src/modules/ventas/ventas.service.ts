@@ -1,5 +1,5 @@
 import { registrarVentaAtomica } from "./ventas.repository.js";
-import { StockInsuficienteError, VentaError } from "./ventas.errors.js";
+import { crearErrorNegocio, crearErrorStockInsuficiente } from "./ventas.errors.js";
 import type {
   MedioPagoVigente,
   ProductoVigente,
@@ -16,7 +16,7 @@ import type {
  * con los datos leídos en ese mismo momento.
  * @param input Cuerpo ya validado por Zod.
  * @returns Respuesta lista para enviar al frontend.
- * @throws {VentaError} Si alguna regla de negocio no se cumple (nada queda escrito).
+ * @throws {ErrorNegocio} Si alguna regla de negocio no se cumple (nada queda escrito).
  */
 export async function registrarVenta(input: RegistrarVentaInput): Promise<RegistrarVentaResponse> {
   const venta = await registrarVentaAtomica(input, (productos, medios) =>
@@ -49,8 +49,8 @@ export async function registrarVenta(input: RegistrarVentaInput): Promise<Regist
  * @param productos Productos leídos de la BD con sus valores vigentes.
  * @param medios Medios de pago leídos de la BD.
  * @returns Líneas, pagos, totales y estado final de la venta.
- * @throws {VentaError} Producto o medio inexistente/inactivo, cantidad inválida, descuento excesivo o pagos que no cuadran.
- * @throws {StockInsuficienteError} Si algún producto no alcanza.
+ * @throws {ErrorNegocio} Producto o medio inexistente/inactivo, cantidad inválida, descuento excesivo,
+ * pagos que no cuadran o stock insuficiente en algún producto. Se lanza como objeto puro, no como Error.
  */
 export function calcularVenta(
   input: RegistrarVentaInput,
@@ -64,22 +64,22 @@ export function calcularVenta(
   const lineas = input.items.map((item) => {
     const producto = productosPorId.get(item.idProducto);
     if (!producto) {
-      throw new VentaError(`El producto ${item.idProducto} no existe`, 404);
+      throw crearErrorNegocio(`El producto ${item.idProducto} no existe`, 404);
     }
     if (!producto.activo) {
-      throw new VentaError(`El producto ${producto.nombre} está inactivo`, 400);
+      throw crearErrorNegocio(`El producto ${producto.nombre} está inactivo`, 400);
     }
 
     // Un producto por unidad no se puede vender fraccionado (1.5 bolsas no tiene sentido)
     const cantidadMilesimas = aMilesimas(item.cantidad);
     if (producto.formatoVenta === "UNIDAD" && cantidadMilesimas % 1000 !== 0) {
-      throw new VentaError(
+      throw crearErrorNegocio(
         `El producto ${producto.nombre} se vende por unidad: la cantidad debe ser entera`,
         400,
       );
     }
     if (cantidadMilesimas > producto.stockMilesimas) {
-      throw new StockInsuficienteError(producto.idProducto);
+      throw crearErrorStockInsuficiente(producto.idProducto);
     }
 
     return {
@@ -96,7 +96,7 @@ export function calcularVenta(
   // El descuento manual es un monto fijo y no puede dejar el total en negativo
   const descuentoManualCentavos = aCentavos(input.descuentoManual ?? 0);
   if (descuentoManualCentavos > subtotalBrutoCentavos) {
-    throw new VentaError("El descuento no puede superar el subtotal", 400);
+    throw crearErrorNegocio("El descuento no puede superar el subtotal", 400);
   }
   const aCobrarCentavos = subtotalBrutoCentavos - descuentoManualCentavos;
 
@@ -117,14 +117,14 @@ export function calcularVenta(
   const pagos = input.pagos.map((pago) => {
     const medio = mediosPorId.get(pago.idMedioPago);
     if (!medio) {
-      throw new VentaError(`El medio de pago ${pago.idMedioPago} no existe`, 404);
+      throw crearErrorNegocio(`El medio de pago ${pago.idMedioPago} no existe`, 404);
     }
     if (!medio.activo) {
-      throw new VentaError(`El medio de pago ${pago.idMedioPago} está inactivo`, 400);
+      throw crearErrorNegocio(`El medio de pago ${pago.idMedioPago} está inactivo`, 400);
     }
     // Un descuento del 100% o más haría que el cliente pague cero o negativo
     if (10000 + medio.ajusteBp <= 0) {
-      throw new VentaError(`El medio de pago ${pago.idMedioPago} tiene un ajuste inválido`, 400);
+      throw crearErrorNegocio(`El medio de pago ${pago.idMedioPago} tiene un ajuste inválido`, 400);
     }
 
     const montoBaseCentavos = aCentavos(pago.monto);
@@ -139,7 +139,7 @@ export function calcularVenta(
   // El cuadre se hace sobre las porciones base: es exacto y no depende de redondeos del recargo
   const sumaBaseCentavos = pagos.reduce((suma, pago) => suma + pago.montoBaseCentavos, 0);
   if (sumaBaseCentavos !== aCobrarCentavos) {
-    throw new VentaError(
+    throw crearErrorNegocio(
       `La suma de los pagos (${formatearCentavos(sumaBaseCentavos)}) no coincide con el total a cobrar (${formatearCentavos(aCobrarCentavos)})`,
       400,
     );
