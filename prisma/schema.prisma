@@ -65,8 +65,8 @@ enum ModalidadEntrega {
   @@map("modalidad_entrega")
 }
 
-// COMPLETADA: tiene ticket, pago registrado e impacto en caja
-// PENDIENTE_PAGO: fiado, descontó stock y tiene detalles, sin ticket ni impacto en caja
+// COMPLETADA: tiene ticket de pago, pago registrado e impacto en caja
+// PENDIENTE_PAGO: fiado, descontó stock y tiene detalles y ticket de deuda, sin pago ni impacto en caja
 // ANULADA: baja lógica, revirtió stock (y caja si ya estaba COMPLETADA)
 enum EstadoVenta {
   COMPLETADA
@@ -180,7 +180,7 @@ model MedioPago {
 // 3. NÚCLEO TRANSACCIONAL DE VENTAS
 model Venta {
   idVenta           Int              @id @default(autoincrement()) @map("id_venta")
-  // Nullable: fiados no tienen ticket hasta que se cobran
+  // Nullable por decisión de diseño, pero toda venta nueva (cobrada o fiado) lo recibe al instante
   numeroComprobante String?          @unique @map("numero_comprobante") @db.VarChar(30)
   fechaHora         DateTime         @default(now()) @map("fecha_hora") @db.Timestamptz(6)
   // Nulo si es fiado; se completa al cobrar
