@@ -150,3 +150,9 @@ vite.config.ts.timestamp-*
 
 # Cliente generado por Prisma
 src/generated/
+dist/
+build/
+.cloudflare/
+.wrangler/
+.DS_Store
+Thumbs.db
