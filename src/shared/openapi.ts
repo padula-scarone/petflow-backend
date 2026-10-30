@@ -3,7 +3,7 @@ import { registrarVentaSchema } from "../modules/ventas/ventas.schemas.js";
 
 // --- ESQUEMAS REUTILIZABLES ---
 
-/** Error de negocio (400/404/409): lo devuelve el controller al capturar un `VentaError`. */
+/** Error de negocio (400/404/409): lo devuelve el controller al capturar un `ErrorNegocio`. */
 const errorNegocio = {
   type: "object",
   properties: {
@@ -43,14 +43,17 @@ const ventaRegistrada = {
         idVenta: { type: "integer", example: 1 },
         numeroComprobante: {
           type: "string",
-          nullable: true,
           example: "CMP-00000001",
-          description: "Nulo en un fiado: el comprobante se emite recién al cobrar",
+          description:
+            "Siempre presente. Toda venta emite comprobante al instante: ticket de pago si el estado es " +
+            "COMPLETADA, ticket de deuda si es PENDIENTE_PAGO (el frontend lo deduce de `estado`)",
         },
         montoTotal: { type: "string", example: "1500.00" },
         estado: { type: "string", enum: ["COMPLETADA", "PENDIENTE_PAGO"] },
         fechaHora: { type: "string", format: "date-time" },
       },
+      // numeroComprobante nunca es nulo: se emite siempre, incluso en un fiado
+      required: ["idVenta", "numeroComprobante", "montoTotal", "estado", "fechaHora"],
     },
   },
 };
@@ -77,7 +80,8 @@ export const openapiDocument = {
         summary: "Registrar una venta (cobrada o fiado)",
         description:
           "Con `pagos` vacío la venta queda `PENDIENTE_PAGO` (fiado) y exige `clienteReferencia`. " +
-          "Descuenta stock y congela precio y costo de cada ítem. Los cobros se asocian a la última caja abierta.",
+          "Descuenta stock y congela precio y costo de cada ítem. Los cobros se asocian a la última caja abierta. " +
+          "Toda venta, cobrada o fiado, devuelve su `numeroComprobante` (ticket de pago o ticket de deuda).",
         requestBody: {
           required: true,
           content: {
