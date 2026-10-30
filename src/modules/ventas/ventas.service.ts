@@ -28,7 +28,7 @@ export async function registrarVenta(input: RegistrarVentaInput): Promise<Regist
   return {
     exito: true,
     mensaje: esFiado
-      ? "Venta registrada como pendiente de pago y stock descontado"
+      ? "Venta registrada como pendiente de pago, stock descontado y ticket de deuda emitido"
       : "Venta registrada y stock descontado",
     venta: {
       idVenta: venta.idVenta,

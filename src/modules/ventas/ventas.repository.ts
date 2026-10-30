@@ -13,8 +13,8 @@ import type {
 /** Datos de la venta ya guardada que necesita el service para armar la respuesta. */
 export type VentaPersistida = {
   idVenta: number;
-  /** Nulo en un fiado. */
-  numeroComprobante: string | null;
+  /** Siempre presente: se emite para toda venta, cobrada o fiado. */
+  numeroComprobante: string;
   montoTotalCentavos: number;
   estado: EstadoVenta;
   fechaHora: Date;
@@ -148,14 +148,14 @@ export async function registrarVentaAtomica(
       select: { idVenta: true, fechaHora: true },
     });
 
-    // El comprobante depende del id, así que se asigna después del insert, dentro de la misma transacción
-    const numeroComprobante = cobrada ? formatearComprobante(venta.idVenta) : null;
-    if (numeroComprobante) {
-      await tx.venta.update({
-        where: { idVenta: venta.idVenta },
-        data: { numeroComprobante },
-      });
-    }
+    // Toda venta emite comprobante al instante (ticket de pago o ticket de deuda).
+    // Depende del id, así que se asigna después del insert, dentro de la misma transacción:
+    // si algo falla, hace rollback y nunca queda una venta sin comprobante.
+    const numeroComprobante = formatearComprobante(venta.idVenta);
+    await tx.venta.update({
+      where: { idVenta: venta.idVenta },
+      data: { numeroComprobante },
+    });
 
     return {
       idVenta: venta.idVenta,

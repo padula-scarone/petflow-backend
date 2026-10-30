@@ -85,8 +85,8 @@ export type RegistrarVentaResponse = {
   mensaje: string;
   venta: {
     idVenta: number;
-    /** Nulo en un fiado: el comprobante se emite recién al cobrar. */
-    numeroComprobante: string | null;
+    /** Siempre presente: toda venta emite comprobante al instante (ticket de pago si queda COMPLETADA, ticket de deuda si queda PENDIENTE_PAGO). */
+    numeroComprobante: string;
     montoTotal: string;
     estado: EstadoVenta;
     /** Fecha y hora en formato ISO 8601. */
