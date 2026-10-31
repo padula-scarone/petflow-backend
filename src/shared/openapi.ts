@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { iniciarSesionSchema } from "../modules/auth/auth.schemas.js";
 import {
   CANTIDAD_POR_PAGINA_MAXIMA,
   CANTIDAD_POR_PAGINA_PREDETERMINADA,
@@ -16,6 +17,50 @@ const errorNegocio = {
   properties: {
     exito: { type: "boolean", example: false },
     mensaje: { type: "string", example: "No hay una caja abierta" },
+  },
+};
+
+/** Error de autenticación o autorización (401/403): lo devuelve el login o el middleware `requerirRol`. */
+const errorAutenticacion = {
+  type: "object",
+  properties: {
+    exito: { type: "boolean", example: false },
+    mensaje: { type: "string", example: "Token de sesión vencido" },
+  },
+};
+
+/** Respuesta exitosa de `POST /api/auth/login` (ver `IniciarSesionResponse`). Nunca incluye el hash. */
+const sesionIniciada = {
+  type: "object",
+  properties: {
+    exito: { type: "boolean", example: true },
+    mensaje: { type: "string", example: "Sesión iniciada" },
+    token: { type: "string", description: "JWT: se envía como `Authorization: Bearer <token>`" },
+    tipoToken: { type: "string", enum: ["Bearer"] },
+    vigenciaSegundos: { type: "integer", example: 28800, description: "Vigencia del token (8 h)" },
+    usuario: {
+      type: "object",
+      properties: {
+        idUsuario: { type: "integer", example: 1 },
+        username: { type: "string", example: "vendedor" },
+        nombre: { type: "string", example: "Vendedor Demo" },
+        rol: { type: "string", enum: ["VENDEDOR", "GESTOR_COMERCIAL", "GERENTE"] },
+      },
+      required: ["idUsuario", "username", "nombre", "rol"],
+    },
+  },
+  required: ["exito", "mensaje", "token", "tipoToken", "vigenciaSegundos", "usuario"],
+};
+
+/** Respuestas 401 y 403 que agrega `requerirRol` a todo endpoint protegido. */
+const respuestasProteccion = {
+  "401": {
+    description: "Token ausente, inválido o vencido",
+    content: { "application/json": { schema: errorAutenticacion } },
+  },
+  "403": {
+    description: "El rol del usuario no está permitido en esta ruta",
+    content: { "application/json": { schema: errorAutenticacion } },
   },
 };
 
@@ -167,16 +212,73 @@ export const openapiDocument = {
     version: "1.0.0",
     description: "API del Sistema de Gestión ERP de Mundo Mascotas.",
   },
-  tags: [{ name: "Ventas", description: "Alta y gestión de ventas" }],
+  tags: [
+    { name: "Seguridad", description: "Inicio de sesión y control de acceso" },
+    { name: "Ventas", description: "Alta y gestión de ventas" },
+  ],
+  components: {
+    securitySchemes: {
+      bearerAuth: {
+        type: "http",
+        scheme: "bearer",
+        bearerFormat: "JWT",
+        description: "Token obtenido en `POST /api/auth/login` (vigencia de 8 horas)",
+      },
+    },
+  },
   paths: {
+    "/api/auth/login": {
+      post: {
+        tags: ["Seguridad"],
+        summary: "Iniciar sesión",
+        description:
+          "Valida `username` y `clave` y devuelve un JWT con vigencia de 8 horas, sin refresh token. " +
+          "Usuario inexistente, clave errónea y usuario inactivo responden igual (401 genérico). " +
+          "Cerrar sesión no tiene endpoint: el frontend descarta el token.",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              // `io: "input"` describe lo que el cliente envía, no el resultado ya transformado
+              schema: z.toJSONSchema(iniciarSesionSchema, { io: "input", target: "draft-7" }),
+            },
+          },
+        },
+        responses: {
+          "200": {
+            description: "Sesión iniciada",
+            content: { "application/json": { schema: sesionIniciada } },
+          },
+          "400": {
+            description: "Body inválido (campo faltante, vacío o `username` de más de 50 caracteres)",
+            content: { "application/json": { schema: errorValidacion } },
+          },
+          "401": {
+            description: "Credenciales inválidas",
+            content: {
+              "application/json": {
+                schema: {
+                  ...errorAutenticacion,
+                  properties: {
+                    ...errorAutenticacion.properties,
+                    mensaje: { type: "string", example: "Credenciales inválidas" },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
     "/api/ventas": {
       get: {
         tags: ["Ventas"],
+        security: [{ bearerAuth: [] }],
         summary: "Consultar el historial de ventas (paginado, con filtros)",
         description:
           "Alimenta la grilla del historial. Orden fijo: fecha descendente con desempate por id descendente. " +
           "Los filtros son opcionales y se combinan con AND. Una página fuera de rango devuelve 200 con lista vacía. " +
-          "No incluye detalles ni pagos de cada venta. No exige caja abierta ni autenticación.",
+          "No incluye detalles ni pagos de cada venta. Requiere sesión (roles VENDEDOR, GESTOR_COMERCIAL o GERENTE); no exige caja abierta.",
         parameters: parametrosHistorial,
         responses: {
           "200": {
@@ -187,10 +289,12 @@ export const openapiDocument = {
             description: "Parámetros de consulta inválidos (formato, rango, fecha inexistente o rango de fechas invertido)",
             content: { "application/json": { schema: errorValidacionConsulta } },
           },
+          ...respuestasProteccion,
         },
       },
       post: {
         tags: ["Ventas"],
+        security: [{ bearerAuth: [] }],
         summary: "Registrar una venta (cobrada o fiado)",
         description:
           "Con `pagos` vacío la venta queda `PENDIENTE_PAGO` (fiado) y exige `clienteReferencia`. " +
@@ -224,6 +328,7 @@ export const openapiDocument = {
             description: "No hay una caja abierta",
             content: { "application/json": { schema: errorNegocio } },
           },
+          ...respuestasProteccion,
         },
       },
     },
