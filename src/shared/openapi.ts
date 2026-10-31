@@ -74,7 +74,7 @@ export const openapiDocument = {
   },
   tags: [{ name: "Ventas", description: "Alta y gestión de ventas" }],
   paths: {
-    "/ventas": {
+    "/api/ventas": {
       post: {
         tags: ["Ventas"],
         summary: "Registrar una venta (cobrada o fiado)",
