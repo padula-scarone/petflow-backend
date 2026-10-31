@@ -20,14 +20,20 @@ const errorNegocio = {
   },
 };
 
-/** Error de autenticación o autorización (401/403): lo devuelve el login o el middleware `requerirRol`. */
-const errorAutenticacion = {
-  type: "object",
-  properties: {
-    exito: { type: "boolean", example: false },
-    mensaje: { type: "string", example: "Token de sesión vencido" },
-  },
-};
+/**
+ * Error de autenticación o autorización (401/403): lo devuelve el login o el middleware `requerirRol`.
+ * Cada respuesta lleva su propio mensaje de ejemplo, el mismo que produce `auth.errors.ts`.
+ * @param mensajeEjemplo Mensaje real de esa respuesta.
+ */
+function crearEsquemaErrorAutenticacion(mensajeEjemplo: string) {
+  return {
+    type: "object",
+    properties: {
+      exito: { type: "boolean", example: false },
+      mensaje: { type: "string", example: mensajeEjemplo },
+    },
+  };
+}
 
 /** Respuesta exitosa de `POST /api/auth/login` (ver `IniciarSesionResponse`). Nunca incluye el hash. */
 const sesionIniciada = {
@@ -42,9 +48,9 @@ const sesionIniciada = {
       type: "object",
       properties: {
         idUsuario: { type: "integer", example: 1 },
-        username: { type: "string", example: "vendedor" },
+        username: { type: "string", example: "demo.vendedor" },
         nombre: { type: "string", example: "Vendedor Demo" },
-        rol: { type: "string", enum: ["VENDEDOR", "GESTOR_COMERCIAL", "GERENTE"] },
+        rol: { type: "string", enum: ["VENDEDOR", "GESTOR_COMERCIAL", "GERENTE"], example: "VENDEDOR" },
       },
       required: ["idUsuario", "username", "nombre", "rol"],
     },
@@ -56,11 +62,13 @@ const sesionIniciada = {
 const respuestasProteccion = {
   "401": {
     description: "Token ausente, inválido o vencido",
-    content: { "application/json": { schema: errorAutenticacion } },
+    content: { "application/json": { schema: crearEsquemaErrorAutenticacion("Token de sesión vencido") } },
   },
   "403": {
     description: "El rol del usuario no está permitido en esta ruta",
-    content: { "application/json": { schema: errorAutenticacion } },
+    content: {
+      "application/json": { schema: crearEsquemaErrorAutenticacion("No tiene permiso para realizar esta acción") },
+    },
   },
 };
 
@@ -76,6 +84,25 @@ const errorValidacion = {
         type: "object",
         properties: {
           campo: { type: "string", example: "items.0.cantidad" },
+          mensaje: { type: "string" },
+        },
+      },
+    },
+  },
+};
+
+/** Error de validación (400) del login: mismo formato, con el mensaje y los campos propios de `auth.controller.ts`. */
+const errorValidacionInicioSesion = {
+  ...errorValidacion,
+  properties: {
+    ...errorValidacion.properties,
+    mensaje: { type: "string", example: "Datos de inicio de sesión inválidos" },
+    errores: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          campo: { type: "string", example: "username" },
           mensaje: { type: "string" },
         },
       },
@@ -251,21 +278,11 @@ export const openapiDocument = {
           },
           "400": {
             description: "Body inválido (campo faltante, vacío o `username` de más de 50 caracteres)",
-            content: { "application/json": { schema: errorValidacion } },
+            content: { "application/json": { schema: errorValidacionInicioSesion } },
           },
           "401": {
             description: "Credenciales inválidas",
-            content: {
-              "application/json": {
-                schema: {
-                  ...errorAutenticacion,
-                  properties: {
-                    ...errorAutenticacion.properties,
-                    mensaje: { type: "string", example: "Credenciales inválidas" },
-                  },
-                },
-              },
-            },
+            content: { "application/json": { schema: crearEsquemaErrorAutenticacion("Credenciales inválidas") } },
           },
         },
       },
