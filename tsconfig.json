@@ -38,6 +38,7 @@
   },
   "exclude": [
     "prisma.config.ts",
+    "prisma",
     "dist"
   ]
 }
