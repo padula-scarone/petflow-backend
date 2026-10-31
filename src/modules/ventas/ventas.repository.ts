@@ -1,8 +1,11 @@
+import type { Prisma } from "../../generated/prisma/client.js";
 import { prisma } from "../../shared/prisma.js";
 import { crearErrorNegocio, crearErrorStockInsuficiente } from "./ventas.errors.js";
 import type {
   EstadoVenta,
+  FiltroHistorialVentas,
   MedioPagoVigente,
+  PaginaHistorialVentas,
   ProductoVigente,
   RegistrarVentaInput,
   TotalesVentaCalculados,
@@ -165,6 +168,87 @@ export async function registrarVentaAtomica(
       fechaHora: venta.fechaHora,
     };
   });
+}
+
+// --- CONSULTA DE HISTORIAL ---
+
+/**
+ * Traduce el filtro del historial a la condición de Prisma.
+ * Cada filtro presente suma una condición y todas se combinan con AND (son claves del mismo objeto).
+ * Se arma con propiedades condicionales porque el tsconfig no admite asignar `undefined` a una propiedad opcional.
+ */
+function construirCondicionHistorial(filtro: FiltroHistorialVentas): Prisma.VentaWhereInput {
+  const hayFiltroDeFecha = filtro.fechaDesdeInclusiva !== undefined || filtro.fechaHastaExclusiva !== undefined;
+
+  return {
+    ...(hayFiltroDeFecha
+      ? {
+          fechaHora: {
+            ...(filtro.fechaDesdeInclusiva !== undefined ? { gte: filtro.fechaDesdeInclusiva } : {}),
+            ...(filtro.fechaHastaExclusiva !== undefined ? { lt: filtro.fechaHastaExclusiva } : {}),
+          },
+        }
+      : {}),
+    ...(filtro.estado !== undefined ? { estado: filtro.estado } : {}),
+    // "some" evita duplicar la venta cuando el producto aparece en más de un detalle
+    ...(filtro.idProducto !== undefined ? { detalles: { some: { idProducto: filtro.idProducto } } } : {}),
+  };
+}
+
+/**
+ * Busca una página del historial de ventas y el total de registros que cumplen el filtro.
+ * Orden fijo: fecha descendente con desempate por id descendente; sin desempate la paginación
+ * podría repetir o saltarse filas que comparten la misma fecha.
+ * @param filtro Filtros ya traducidos (fechas como instantes).
+ * @param desplazamiento Cantidad de filas a saltar.
+ * @param cantidadPorPagina Cantidad máxima de filas a devolver.
+ */
+export async function buscarHistorialVentas(
+  filtro: FiltroHistorialVentas,
+  desplazamiento: number,
+  cantidadPorPagina: number,
+): Promise<PaginaHistorialVentas> {
+  // El mismo where en las filas y en el conteo, para que el total sea coherente con la lista
+  const condicion = construirCondicionHistorial(filtro);
+
+  // RepeatableRead: ambas consultas ven la misma foto de la BD aunque entre una venta nueva a mitad de camino
+  const [filas, totalRegistros] = await prisma.$transaction(
+    [
+      prisma.venta.findMany({
+        where: condicion,
+        orderBy: [{ fechaHora: "desc" }, { idVenta: "desc" }],
+        skip: desplazamiento,
+        take: cantidadPorPagina,
+        // Solo las columnas de la grilla: payload liviano
+        select: {
+          idVenta: true,
+          numeroComprobante: true,
+          fechaHora: true,
+          estado: true,
+          montoTotal: true,
+          clienteReferencia: true,
+          origen: true,
+          modalidadEntrega: true,
+        },
+      }),
+      prisma.venta.count({ where: condicion }),
+    ],
+    { isolationLevel: "RepeatableRead" },
+  );
+
+  return {
+    filas: filas.map((fila) => ({
+      idVenta: fila.idVenta,
+      numeroComprobante: fila.numeroComprobante,
+      fechaHora: fila.fechaHora,
+      estado: fila.estado,
+      montoTotalCentavos: aCentavos(fila.montoTotal),
+      clienteReferencia: fila.clienteReferencia,
+      origen: fila.origen,
+      modalidadEntrega: fila.modalidadEntrega,
+    })),
+    totalRegistros,
+  };
 }
 
 // --- UTILIDADES ---

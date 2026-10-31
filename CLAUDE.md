@@ -42,4 +42,4 @@ Para consultar el modelo de datos relacional, los Casos de Uso Base (CUB) y las 
 - **Prisma 7.10.1** con `@prisma/adapter-pg` (`prisma`, `@prisma/client`). No migrar a Prisma 8: decisión del arquitecto, la versión rc quedó descartada por inestable.
 - `prisma.config.ts` usa `DIRECT_URL` (CLI); `src/shared/prisma.ts` usa `DATABASE_URL` (pooler) en runtime.
 - El cliente se genera en `src/generated/prisma/` (ignorado por git).
-- Módulo `ventas` implementado: `POST /ventas` (alta de venta cobrada o fiado). Detalle de reglas: `../petflow-workspace/SSOT.md`.
+- Módulo `ventas` implementado: `POST /api/ventas` (alta de venta cobrada o fiado) y `GET /api/ventas` (historial paginado con filtros por fecha, producto y estado). Detalle de reglas: `../petflow-workspace/SSOT.md`.

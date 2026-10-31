@@ -1,12 +1,23 @@
-import { registrarVentaAtomica } from "./ventas.repository.js";
+import { buscarHistorialVentas, registrarVentaAtomica } from "./ventas.repository.js";
 import { crearErrorNegocio, crearErrorStockInsuficiente } from "./ventas.errors.js";
+import { descomponerFechaCalendario } from "./ventas.schemas.js";
 import type {
+  ConsultarHistorialInput,
+  ConsultarHistorialResponse,
+  FilaHistorialVenta,
+  FiltroHistorialVentas,
   MedioPagoVigente,
   ProductoVigente,
   RegistrarVentaInput,
   RegistrarVentaResponse,
   TotalesVentaCalculados,
+  VentaHistorial,
 } from "./ventas.types.js";
+
+// --- CONSTANTES ---
+
+/** Horas que Argentina (UTC-3, sin horario de verano) está por detrás de UTC. */
+const HORAS_DESFASE_ARGENTINA_RESPECTO_UTC = 3;
 
 // --- ORQUESTACIÓN ---
 
@@ -174,4 +185,93 @@ function aCentavos(monto: number): number {
 /** Convierte una cantidad decimal a milésimas enteras (la BD guarda 3 decimales). */
 function aMilesimas(cantidad: number): number {
   return Math.round(cantidad * 1000);
+}
+
+// --- CONSULTA DE HISTORIAL ---
+
+/**
+ * Consulta una página del historial de ventas con sus filtros.
+ * @param consulta Query ya validada por Zod (con valores por defecto aplicados).
+ * @returns Las ventas de la página y los metadatos de paginación. Una página fuera de rango devuelve lista vacía.
+ */
+export async function consultarHistorial(consulta: ConsultarHistorialInput): Promise<ConsultarHistorialResponse> {
+  const filtro = calcularFiltroHistorial(consulta);
+  const desplazamiento = calcularDesplazamiento(consulta.pagina, consulta.cantidadPorPagina);
+
+  const paginaEncontrada = await buscarHistorialVentas(filtro, desplazamiento, consulta.cantidadPorPagina);
+
+  return {
+    exito: true,
+    ventas: paginaEncontrada.filas.map(convertirFilaHistorial),
+    paginacion: {
+      pagina: consulta.pagina,
+      cantidadPorPagina: consulta.cantidadPorPagina,
+      totalRegistros: paginaEncontrada.totalRegistros,
+      totalPaginas: calcularTotalPaginas(paginaEncontrada.totalRegistros, consulta.cantidadPorPagina),
+    },
+  };
+}
+
+// --- CÁLCULO PURO DEL HISTORIAL ---
+
+/**
+ * Traduce los filtros de la query a los valores que consulta el repositorio.
+ * Solo se incluyen los filtros presentes.
+ * @throws {ErrorNegocio} Si una fecha no existe en el calendario (el esquema Zod ya lo impide; es una defensa).
+ */
+export function calcularFiltroHistorial(consulta: ConsultarHistorialInput): FiltroHistorialVentas {
+  return {
+    // Desde: 00:00 (hora argentina) del día indicado, inclusivo
+    ...(consulta.fechaDesde !== undefined
+      ? { fechaDesdeInclusiva: calcularInicioDiaArgentina(consulta.fechaDesde, 0) }
+      : {}),
+    // Hasta: el día indicado debe quedar incluido completo, así que el límite es 00:00 del día siguiente, exclusivo
+    ...(consulta.fechaHasta !== undefined
+      ? { fechaHastaExclusiva: calcularInicioDiaArgentina(consulta.fechaHasta, 1) }
+      : {}),
+    ...(consulta.idProducto !== undefined ? { idProducto: consulta.idProducto } : {}),
+    ...(consulta.estado !== undefined ? { estado: consulta.estado } : {}),
+  };
+}
+
+/**
+ * Devuelve el instante UTC en que empieza un día en Argentina.
+ * @param fecha Fecha `AAAA-MM-DD`.
+ * @param diasAdicionales Días a sumar al día indicado (0 = el mismo día, 1 = el siguiente).
+ * @example calcularInicioDiaArgentina("2026-10-30", 0) // 2026-10-30T03:00:00.000Z
+ */
+function calcularInicioDiaArgentina(fecha: string, diasAdicionales: number): Date {
+  const partes = descomponerFechaCalendario(fecha);
+  if (partes === null) {
+    throw crearErrorNegocio(`La fecha ${fecha} no existe en el calendario`, 400);
+  }
+
+  // Date.UTC normaliza el desborde de día (31 + 1 pasa al mes siguiente) sin contar días por mes
+  return new Date(
+    Date.UTC(partes.ejercicio, partes.mes - 1, partes.dia + diasAdicionales, HORAS_DESFASE_ARGENTINA_RESPECTO_UTC),
+  );
+}
+
+/** Cantidad de filas a saltar para llegar a una página (la página 1 no salta ninguna). */
+export function calcularDesplazamiento(pagina: number, cantidadPorPagina: number): number {
+  return (pagina - 1) * cantidadPorPagina;
+}
+
+/** Total de páginas: techo de registros / tamaño de página; 0 si no hay registros. */
+export function calcularTotalPaginas(totalRegistros: number, cantidadPorPagina: number): number {
+  return Math.ceil(totalRegistros / cantidadPorPagina);
+}
+
+/** Convierte una fila del repositorio al formato de la respuesta (fecha ISO y monto con 2 decimales). */
+function convertirFilaHistorial(fila: FilaHistorialVenta): VentaHistorial {
+  return {
+    idVenta: fila.idVenta,
+    numeroComprobante: fila.numeroComprobante,
+    fechaHora: fila.fechaHora.toISOString(),
+    estado: fila.estado,
+    montoTotal: formatearCentavos(fila.montoTotalCentavos),
+    clienteReferencia: fila.clienteReferencia,
+    origen: fila.origen,
+    modalidadEntrega: fila.modalidadEntrega,
+  };
 }

@@ -10,7 +10,7 @@ app.use(express.json());
 // Documentación interactiva de la API
 app.use("/docs", swaggerUi.serve, swaggerUi.setup(openapiDocument));
 
-app.use("/ventas", ventasRouter);
+app.use("/api/ventas", ventasRouter);
 
 const puerto = Number(process.env.PORT ?? 3000);
 

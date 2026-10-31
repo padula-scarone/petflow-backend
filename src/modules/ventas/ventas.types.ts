@@ -1,9 +1,9 @@
 import type { z } from "zod";
-import type { registrarVentaSchema } from "./ventas.schemas.js";
+import type { consultarHistorialSchema, ESTADOS_VENTA_HISTORIAL, registrarVentaSchema } from "./ventas.schemas.js";
 
 // --- TIPOS DE ENTRADA ---
 
-/** Cuerpo validado de `POST /ventas`, inferido del esquema Zod. */
+/** Cuerpo validado de `POST /api/ventas`, inferido del esquema Zod. */
 export type RegistrarVentaInput = z.infer<typeof registrarVentaSchema>;
 
 /** Canal por el que se originó la venta. */
@@ -79,7 +79,7 @@ export type TotalesVentaCalculados = {
 
 // --- RESPUESTA HTTP ---
 
-/** Respuesta exitosa de `POST /ventas`. Los montos viajan como texto con 2 decimales. */
+/** Respuesta exitosa de `POST /api/ventas`. Los montos viajan como texto con 2 decimales. */
 export type RegistrarVentaResponse = {
   exito: true;
   mensaje: string;
@@ -92,4 +92,83 @@ export type RegistrarVentaResponse = {
     /** Fecha y hora en formato ISO 8601. */
     fechaHora: string;
   };
+};
+
+// --- HISTORIAL DE VENTAS: ENTRADA Y FILTRO ---
+
+/** Query validada de `GET /api/ventas`, inferida del esquema Zod (ya con valores por defecto aplicados). */
+export type ConsultarHistorialInput = z.infer<typeof consultarHistorialSchema>;
+
+/** Estados consultables en el historial: incluye ANULADA, que no existe al registrar una venta. */
+export type EstadoVentaHistorial = (typeof ESTADOS_VENTA_HISTORIAL)[number];
+
+/** Filtros del historial ya traducidos a valores listos para consultar. Todos se combinan con AND. */
+export type FiltroHistorialVentas = {
+  /** Límite inferior inclusivo: 00:00 (hora de Argentina) del día `fechaDesde`. */
+  fechaDesdeInclusiva?: Date;
+  /** Límite superior exclusivo: 00:00 (hora de Argentina) del día siguiente a `fechaHasta`. */
+  fechaHastaExclusiva?: Date;
+  /** Solo ventas que contienen este producto en sus detalles. */
+  idProducto?: number;
+  estado?: EstadoVentaHistorial;
+};
+
+// --- HISTORIAL DE VENTAS: DATOS DE LA BASE ---
+
+/** Fila del historial tal como la entrega el repositorio. */
+export type FilaHistorialVenta = {
+  idVenta: number;
+  /**
+   * Nulo solo en datos anteriores al backfill: la columna sigue siendo nullable en el esquema,
+   * aunque toda venta nueva emite comprobante al instante.
+   */
+  numeroComprobante: string | null;
+  fechaHora: Date;
+  estado: EstadoVentaHistorial;
+  montoTotalCentavos: number;
+  clienteReferencia: string | null;
+  origen: OrigenVenta;
+  modalidadEntrega: ModalidadEntrega;
+};
+
+/** Una página de filas más el total de registros que cumplen el filtro (sin paginar). */
+export type PaginaHistorialVentas = {
+  filas: FilaHistorialVenta[];
+  totalRegistros: number;
+};
+
+// --- HISTORIAL DE VENTAS: RESPUESTA HTTP ---
+
+/** Fila de la grilla de historial en la respuesta. No incluye detalles ni pagos (eso es "Consultar Venta"). */
+export type VentaHistorial = {
+  idVenta: number;
+  /** Nulo solo en datos anteriores al backfill. */
+  numeroComprobante: string | null;
+  /** Fecha y hora en formato ISO 8601. */
+  fechaHora: string;
+  estado: EstadoVentaHistorial;
+  /** Monto total como texto con 2 decimales, igual que en el alta. */
+  montoTotal: string;
+  /** Nulo si la venta no tiene cliente asociado. */
+  clienteReferencia: string | null;
+  origen: OrigenVenta;
+  modalidadEntrega: ModalidadEntrega;
+};
+
+/** Metadatos de paginación de la respuesta. */
+export type PaginacionHistorial = {
+  /** Página solicitada (empieza en 1). */
+  pagina: number;
+  cantidadPorPagina: number;
+  /** Total de ventas que cumplen el filtro, sin paginar. */
+  totalRegistros: number;
+  /** Techo de totalRegistros / cantidadPorPagina; 0 si no hay filas. */
+  totalPaginas: number;
+};
+
+/** Respuesta exitosa de `GET /api/ventas`. Una página fuera de rango devuelve `ventas` vacío. */
+export type ConsultarHistorialResponse = {
+  exito: true;
+  ventas: VentaHistorial[];
+  paginacion: PaginacionHistorial;
 };

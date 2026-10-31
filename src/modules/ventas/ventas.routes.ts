@@ -1,10 +1,13 @@
 import { Router } from "express";
-import { postRegistrarVenta } from "./ventas.controller.js";
+import { getConsultarHistorial, postRegistrarVenta } from "./ventas.controller.js";
 
 // --- RUTAS ---
 
-/** Router del módulo de ventas; se monta en `/ventas` desde `server.ts`. */
+/** Router del módulo de ventas; se monta en `/api/ventas` desde `server.ts`. */
 export const ventasRouter = Router();
 
-// POST /ventas: registrar una venta (cobrada o fiado)
+// POST /api/ventas: registrar una venta (cobrada o fiado)
 ventasRouter.post("/", postRegistrarVenta);
+
+// GET /api/ventas: historial paginado con filtros (fecha, producto, estado)
+ventasRouter.get("/", getConsultarHistorial);
