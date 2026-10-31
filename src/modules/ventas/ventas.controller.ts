@@ -3,6 +3,31 @@ import { esErrorNegocio } from "./ventas.errors.js";
 import { registrarVentaSchema } from "./ventas.schemas.js";
 import { registrarVenta } from "./ventas.service.js";
 
+// --- FUNCIONES AUXILIARES ---
+
+/** Incidencia de validación de Zod reducida a lo que necesita la respuesta. */
+type IncidenciaValidacion = {
+  path: ReadonlyArray<PropertyKey>;
+  message: string;
+};
+
+/**
+ * Arma el cuerpo de la respuesta 400 por datos inválidos: un elemento por cada campo con error.
+ * Se centraliza para que todos los endpoints del módulo respondan con el mismo formato.
+ * @param mensaje Mensaje general (por ejemplo "Datos de venta inválidos").
+ * @param incidencias Incidencias reportadas por Zod.
+ */
+function construirRespuestaValidacion(mensaje: string, incidencias: ReadonlyArray<IncidenciaValidacion>) {
+  return {
+    exito: false,
+    mensaje,
+    errores: incidencias.map((incidencia) => ({
+      campo: incidencia.path.join("."),
+      mensaje: incidencia.message,
+    })),
+  };
+}
+
 // --- HANDLERS ---
 
 /**
@@ -15,14 +40,7 @@ export async function postRegistrarVenta(req: Request, res: Response): Promise<v
   // safeParse no lanza: permite responder el detalle de cada campo inválido
   const parseo = registrarVentaSchema.safeParse(req.body);
   if (!parseo.success) {
-    res.status(400).json({
-      exito: false,
-      mensaje: "Datos de venta inválidos",
-      errores: parseo.error.issues.map((issue) => ({
-        campo: issue.path.join("."),
-        mensaje: issue.message,
-      })),
-    });
+    res.status(400).json(construirRespuestaValidacion("Datos de venta inválidos", parseo.error.issues));
     return;
   }
 
