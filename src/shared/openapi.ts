@@ -1,5 +1,12 @@
 import { z } from "zod";
-import { registrarVentaSchema } from "../modules/ventas/ventas.schemas.js";
+import {
+  CANTIDAD_POR_PAGINA_MAXIMA,
+  CANTIDAD_POR_PAGINA_PREDETERMINADA,
+  consultarHistorialSchema,
+  ID_PRODUCTO_MAXIMO,
+  PAGINA_MAXIMA,
+  registrarVentaSchema,
+} from "../modules/ventas/ventas.schemas.js";
 
 // --- ESQUEMAS REUTILIZABLES ---
 
@@ -31,7 +38,7 @@ const errorValidacion = {
   },
 };
 
-/** Respuesta exitosa de `POST /ventas` (ver `RegistrarVentaResponse`). */
+/** Respuesta exitosa de `POST /api/ventas` (ver `RegistrarVentaResponse`). */
 const ventaRegistrada = {
   type: "object",
   properties: {
@@ -58,11 +65,99 @@ const ventaRegistrada = {
   },
 };
 
+/** Error de validación (400) de la consulta del historial: mismo formato, con el mensaje propio de la query. */
+const errorValidacionConsulta = {
+  ...errorValidacion,
+  properties: {
+    ...errorValidacion.properties,
+    mensaje: { type: "string", example: "Parámetros de consulta inválidos" },
+    errores: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          campo: { type: "string", example: "pagina" },
+          mensaje: { type: "string" },
+        },
+      },
+    },
+  },
+};
+
+/** Respuesta exitosa de `GET /api/ventas` (ver `ConsultarHistorialResponse`). */
+const historialConsultado = {
+  type: "object",
+  properties: {
+    exito: { type: "boolean", example: true },
+    ventas: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          idVenta: { type: "integer", example: 10 },
+          numeroComprobante: {
+            type: "string",
+            nullable: true,
+            example: "CMP-00000010",
+            description: "Nulo solo en datos anteriores al backfill",
+          },
+          fechaHora: { type: "string", format: "date-time" },
+          estado: { type: "string", enum: ["COMPLETADA", "PENDIENTE_PAGO", "ANULADA"] },
+          montoTotal: { type: "string", example: "1425.00" },
+          clienteReferencia: { type: "string", nullable: true, example: "Maria Lopez" },
+          origen: { type: "string", enum: ["MOSTRADOR", "DIGITAL"] },
+          modalidadEntrega: { type: "string", enum: ["RETIRO", "ENVIO"] },
+        },
+        required: ["idVenta", "numeroComprobante", "fechaHora", "estado", "montoTotal", "clienteReferencia", "origen", "modalidadEntrega"],
+      },
+    },
+    paginacion: {
+      type: "object",
+      properties: {
+        pagina: { type: "integer", example: 1 },
+        cantidadPorPagina: { type: "integer", example: 20 },
+        totalRegistros: { type: "integer", example: 10 },
+        totalPaginas: { type: "integer", example: 1 },
+      },
+      required: ["pagina", "cantidadPorPagina", "totalRegistros", "totalPaginas"],
+    },
+  },
+  required: ["exito", "ventas", "paginacion"],
+};
+
+// --- PARÁMETROS DEL HISTORIAL ---
+
+/**
+ * Descripción de cada parámetro de la consulta. El esquema derivado de Zod solo aporta el patrón del texto:
+ * los rangos y valores por defecto se escriben aquí, tomándolos de las mismas constantes del esquema.
+ */
+const descripcionesParametrosHistorial: Record<string, string> = {
+  pagina: `Número de página, entero entre 1 y ${PAGINA_MAXIMA}. Por defecto 1.`,
+  cantidadPorPagina: `Filas por página, entero entre 1 y ${CANTIDAD_POR_PAGINA_MAXIMA}. Por defecto ${CANTIDAD_POR_PAGINA_PREDETERMINADA}.`,
+  fechaDesde:
+    "Día inicial inclusivo (AAAA-MM-DD), interpretado en hora de Argentina (UTC-3): desde las 00:00 de ese día.",
+  fechaHasta:
+    "Día final inclusivo (AAAA-MM-DD), interpretado en hora de Argentina (UTC-3): hasta las 23:59:59 de ese día. No puede ser anterior a fechaDesde.",
+  idProducto: `Entero positivo (máximo ${ID_PRODUCTO_MAXIMO}). Solo ventas que contienen este producto en sus detalles.`,
+  estado: "Solo ventas en este estado. Sin este filtro se devuelven todas, incluidas las anuladas.",
+};
+
+// Los parámetros se derivan del esquema Zod real (io "input" = lo que envía el cliente), así no se desactualizan
+const esquemaConsultaHistorial = z.toJSONSchema(consultarHistorialSchema, { io: "input", target: "draft-7" });
+const parametrosHistorial = Object.entries(esquemaConsultaHistorial.properties ?? {}).map(([nombre, esquema]) => ({
+  name: nombre,
+  in: "query",
+  required: false,
+  description: descripcionesParametrosHistorial[nombre],
+  schema: esquema,
+}));
+
 // --- DOCUMENTO OPENAPI ---
 
 /**
  * Especificación OpenAPI 3.0 de la API, servida por Swagger UI en `/docs`.
- * El body de `POST /ventas` se deriva del esquema Zod real, así el contrato no se desactualiza.
+ * El body de `POST /api/ventas` y los parámetros de `GET /api/ventas` se derivan de los esquemas Zod reales,
+ * así el contrato no se desactualiza.
  * Al agregar un endpoint nuevo hay que sumar su entrada en `paths`.
  */
 export const openapiDocument = {
@@ -75,6 +170,25 @@ export const openapiDocument = {
   tags: [{ name: "Ventas", description: "Alta y gestión de ventas" }],
   paths: {
     "/api/ventas": {
+      get: {
+        tags: ["Ventas"],
+        summary: "Consultar el historial de ventas (paginado, con filtros)",
+        description:
+          "Alimenta la grilla del historial. Orden fijo: fecha descendente con desempate por id descendente. " +
+          "Los filtros son opcionales y se combinan con AND. Una página fuera de rango devuelve 200 con lista vacía. " +
+          "No incluye detalles ni pagos de cada venta. No exige caja abierta ni autenticación.",
+        parameters: parametrosHistorial,
+        responses: {
+          "200": {
+            description: "Página del historial con sus metadatos de paginación",
+            content: { "application/json": { schema: historialConsultado } },
+          },
+          "400": {
+            description: "Parámetros de consulta inválidos (formato, rango, fecha inexistente o rango de fechas invertido)",
+            content: { "application/json": { schema: errorValidacionConsulta } },
+          },
+        },
+      },
       post: {
         tags: ["Ventas"],
         summary: "Registrar una venta (cobrada o fiado)",
