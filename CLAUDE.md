@@ -37,3 +37,9 @@ Para consultar el modelo de datos relacional, los Casos de Uso Base (CUB) y las 
   - *Tipos:* `feat`, `fix`, `style`, `refactor`, `docs`, `chore`.
   - *Alcances permitidos:* `ventas`, `caja`, `auth`, `api`, `db`.
 
+
+# Stack fijado en esta rama (`feat/1-alta-venta`)
+- **Prisma 7.10.1** con `@prisma/adapter-pg` (`prisma`, `@prisma/client`). No migrar a Prisma 8: decisión del arquitecto, la versión rc quedó descartada por inestable.
+- `prisma.config.ts` usa `DIRECT_URL` (CLI); `src/shared/prisma.ts` usa `DATABASE_URL` (pooler) en runtime.
+- El cliente se genera en `src/generated/prisma/` (ignorado por git).
+- Módulo `ventas` implementado: `POST /ventas` (alta de venta cobrada o fiado). Detalle de reglas: `../petflow-workspace/SSOT.md`.
