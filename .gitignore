@@ -147,3 +147,12 @@ vite.config.ts.timestamp-*
 
 # Turbo Repo
 .turbo
+
+# Cliente generado por Prisma
+src/generated/
+dist/
+build/
+.cloudflare/
+.wrangler/
+.DS_Store
+Thumbs.db
