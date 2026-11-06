@@ -1,16 +1,23 @@
-import { buscarHistorialVentas, registrarVentaAtomica } from "./ventas.repository.js";
+import { buscarHistorialVentas, buscarVentaPorId, registrarVentaAtomica } from "./ventas.repository.js";
 import { crearErrorNegocio, crearErrorStockInsuficiente } from "./ventas.errors.js";
 import { descomponerFechaCalendario } from "./ventas.schemas.js";
 import type {
   ConsultarHistorialInput,
   ConsultarHistorialResponse,
+  ConsultarVentaInput,
+  ConsultarVentaResponse,
   FilaHistorialVenta,
   FiltroHistorialVentas,
+  ItemVentaConsultado,
+  ItemVentaDetallado,
   MedioPagoVigente,
+  PagoVentaConsultado,
+  PagoVentaDetallado,
   ProductoVigente,
   RegistrarVentaInput,
   RegistrarVentaResponse,
   TotalesVentaCalculados,
+  VentaDetallada,
   VentaHistorial,
 } from "./ventas.types.js";
 
@@ -274,4 +281,85 @@ function convertirFilaHistorial(fila: FilaHistorialVenta): VentaHistorial {
     origen: fila.origen,
     modalidadEntrega: fila.modalidadEntrega,
   };
+}
+
+// --- CONSULTA DE UNA VENTA ---
+
+/**
+ * Devuelve el detalle de una venta con sus ítems y pagos. Es solo lectura y sirve en cualquier estado.
+ * Los importes salen tal como se guardaron: no se recalcula nada con precios o porcentajes actuales.
+ * @param consulta Parámetros de ruta ya validados por Zod.
+ * @throws {ErrorNegocio} 404 si la venta no existe. Se lanza como objeto puro, no como Error.
+ */
+export async function consultarVenta(consulta: ConsultarVentaInput): Promise<ConsultarVentaResponse> {
+  const venta = await buscarVentaPorId(consulta.idVenta);
+  if (venta === null) {
+    throw crearErrorNegocio(`La venta ${consulta.idVenta} no existe`, 404);
+  }
+
+  return { exito: true, venta: convertirVentaDetallada(venta) };
+}
+
+/**
+ * Convierte la venta del repositorio al formato de la respuesta.
+ * El tipo de comprobante no se agrega: el frontend lo deduce de `estado` (pagos vacíos y
+ * `fechaHoraPago` nulo en un fiado; pagos y `fechaHoraPago` con valor en una venta cobrada).
+ */
+function convertirVentaDetallada(venta: VentaDetallada): ConsultarVentaResponse["venta"] {
+  return {
+    idVenta: venta.idVenta,
+    numeroComprobante: venta.numeroComprobante,
+    fechaHora: venta.fechaHora.toISOString(),
+    // Un fiado no cobrado no tiene fecha de pago
+    fechaHoraPago: venta.fechaHoraPago === null ? null : venta.fechaHoraPago.toISOString(),
+    estado: venta.estado,
+    origen: venta.origen,
+    modalidadEntrega: venta.modalidadEntrega,
+    clienteReferencia: venta.clienteReferencia,
+    vendedor: venta.vendedor,
+    subtotalBruto: formatearCentavos(venta.subtotalBrutoCentavos),
+    descuentoManual: formatearCentavos(venta.descuentoManualCentavos),
+    montoTotal: formatearCentavos(venta.montoTotalCentavos),
+    items: venta.items.map(convertirItemVenta),
+    pagos: venta.pagos.map(convertirPagoVenta),
+  };
+}
+
+/** Convierte un ítem al formato de la respuesta: precio con 2 decimales y cantidad con 3. */
+function convertirItemVenta(item: ItemVentaDetallado): ItemVentaConsultado {
+  return {
+    idProducto: item.idProducto,
+    nombreProducto: item.nombreProducto,
+    formatoVenta: item.formatoVenta,
+    cantidad: formatearMilesimas(item.cantidadMilesimas),
+    precioUnitario: formatearCentavos(item.precioUnitarioCentavos),
+    subtotal: formatearCentavos(item.subtotalCentavos),
+  };
+}
+
+/** Convierte un pago al formato de la respuesta: montos y porcentaje con 2 decimales. */
+function convertirPagoVenta(pago: PagoVentaDetallado): PagoVentaConsultado {
+  return {
+    idMedioPago: pago.idMedioPago,
+    nombreMedioPago: pago.nombreMedioPago,
+    montoBase: formatearCentavos(pago.montoBaseCentavos),
+    porcentajeAplicado: formatearBasisPoints(pago.porcentajeAplicadoBp),
+    montoFinal: formatearCentavos(pago.montoFinalCentavos),
+  };
+}
+
+/**
+ * Convierte milésimas enteras a texto con 3 decimales.
+ * @example formatearMilesimas(2500) // "2.500"
+ */
+function formatearMilesimas(milesimas: number): string {
+  return (milesimas / 1000).toFixed(3);
+}
+
+/**
+ * Convierte basis points a texto de porcentaje con 2 decimales; conserva el signo del descuento.
+ * @example formatearBasisPoints(-500) // "-5.00"
+ */
+function formatearBasisPoints(basisPoints: number): string {
+  return (basisPoints / 100).toFixed(2);
 }

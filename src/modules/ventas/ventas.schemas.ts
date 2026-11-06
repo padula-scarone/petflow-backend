@@ -109,6 +109,9 @@ export const PAGINA_MAXIMA = 1_000_000;
 /** Tope de `idProducto`: es el máximo de una columna integer de PostgreSQL (más allá, la BD falla con 500). */
 export const ID_PRODUCTO_MAXIMO = 2_147_483_647;
 
+/** Tope de `idVenta`: mismo máximo de la columna integer de PostgreSQL; un valor mayor haría fallar la BD con 500. */
+export const ID_VENTA_MAXIMO = 2_147_483_647;
+
 // --- CONSULTA DE HISTORIAL: AUXILIARES ---
 
 /**
@@ -181,3 +184,13 @@ export const consultarHistorialSchema = z
       });
     }
   });
+
+// --- CONSULTA DE UNA VENTA: ESQUEMA ---
+
+/**
+ * Contrato de entrada de `GET /api/ventas/:idVenta` (parámetro de ruta).
+ * Llega como texto y se convierte de forma estricta, igual que la query del historial.
+ */
+export const consultarVentaSchema = z.object({
+  idVenta: enteroDesdeTexto(1, ID_VENTA_MAXIMO),
+});

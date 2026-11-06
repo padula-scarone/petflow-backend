@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { requerirRol } from "../auth/auth.middleware.js";
-import { getConsultarHistorial, postRegistrarVenta } from "./ventas.controller.js";
+import { getConsultarHistorial, getConsultarVenta, postRegistrarVenta } from "./ventas.controller.js";
 
 // --- RUTAS ---
 
@@ -12,3 +12,6 @@ ventasRouter.post("/", requerirRol("VENDEDOR", "GESTOR_COMERCIAL", "GERENTE"), p
 
 // GET /api/ventas: historial paginado con filtros (fecha, producto, estado). Requiere sesión validada (CUB 1.2)
 ventasRouter.get("/", requerirRol("VENDEDOR", "GESTOR_COMERCIAL", "GERENTE"), getConsultarHistorial);
+
+// GET /api/ventas/:idVenta: detalle de una venta con ítems y pagos. Requiere sesión validada; no exige caja abierta
+ventasRouter.get("/:idVenta", requerirRol("VENDEDOR", "GESTOR_COMERCIAL", "GERENTE"), getConsultarVenta);

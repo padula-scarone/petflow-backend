@@ -1,5 +1,10 @@
 import type { z } from "zod";
-import type { consultarHistorialSchema, ESTADOS_VENTA_HISTORIAL, registrarVentaSchema } from "./ventas.schemas.js";
+import type {
+  consultarHistorialSchema,
+  consultarVentaSchema,
+  ESTADOS_VENTA_HISTORIAL,
+  registrarVentaSchema,
+} from "./ventas.schemas.js";
 
 // --- TIPOS DE ENTRADA ---
 
@@ -171,4 +176,117 @@ export type ConsultarHistorialResponse = {
   exito: true;
   ventas: VentaHistorial[];
   paginacion: PaginacionHistorial;
+};
+
+// --- CONSULTA DE UNA VENTA: ENTRADA ---
+
+/** Parámetros de ruta validados de `GET /api/ventas/:idVenta`, inferidos del esquema Zod. */
+export type ConsultarVentaInput = z.infer<typeof consultarVentaSchema>;
+
+// --- CONSULTA DE UNA VENTA: DATOS DE LA BASE ---
+// Solo incluye lo que el contrato permite devolver: el costo congelado, montoRecibido y vuelto
+// no se piden a la base.
+
+/** Una línea de la venta tal como se guardó (precio congelado al registrar). */
+export type ItemVentaDetallado = {
+  idProducto: number;
+  /** Nombre actual del producto: el esquema no lo congela en el detalle. */
+  nombreProducto: string;
+  formatoVenta: "UNIDAD" | "GRANEL";
+  cantidadMilesimas: number;
+  precioUnitarioCentavos: number;
+  subtotalCentavos: number;
+};
+
+/** Un pago de la venta tal como se guardó (porcentaje congelado al registrar). */
+export type PagoVentaDetallado = {
+  idMedioPago: number;
+  /** Nombre actual del medio de pago: el esquema no lo congela en el pago. */
+  nombreMedioPago: string;
+  montoBaseCentavos: number;
+  /** Ajuste neto (recargo − descuento) aplicado, en basis points. */
+  porcentajeAplicadoBp: number;
+  montoFinalCentavos: number;
+};
+
+/** Vendedor que registró la venta. */
+export type VendedorVenta = {
+  idUsuario: number;
+  nombre: string;
+};
+
+/** Venta completa con sus ítems y pagos, tal como la entrega el repositorio. */
+export type VentaDetallada = {
+  idVenta: number;
+  /** Nulo solo en datos anteriores al backfill. */
+  numeroComprobante: string | null;
+  fechaHora: Date;
+  /** Nulo si es fiado y todavía no se cobró. */
+  fechaHoraPago: Date | null;
+  estado: EstadoVentaHistorial;
+  origen: OrigenVenta;
+  modalidadEntrega: ModalidadEntrega;
+  clienteReferencia: string | null;
+  vendedor: VendedorVenta;
+  subtotalBrutoCentavos: number;
+  descuentoManualCentavos: number;
+  montoTotalCentavos: number;
+  items: ItemVentaDetallado[];
+  /** Vacío en un fiado no cobrado. */
+  pagos: PagoVentaDetallado[];
+};
+
+// --- CONSULTA DE UNA VENTA: RESPUESTA HTTP ---
+
+/** Línea de la venta en la respuesta: precio como texto con 2 decimales, cantidad con 3. */
+export type ItemVentaConsultado = {
+  idProducto: number;
+  nombreProducto: string;
+  formatoVenta: "UNIDAD" | "GRANEL";
+  /** Texto con 3 decimales. */
+  cantidad: string;
+  /** Texto con 2 decimales. */
+  precioUnitario: string;
+  /** Texto con 2 decimales. */
+  subtotal: string;
+};
+
+/** Pago de la venta en la respuesta: montos como texto con 2 decimales. */
+export type PagoVentaConsultado = {
+  idMedioPago: number;
+  nombreMedioPago: string;
+  montoBase: string;
+  /** Ajuste neto como texto con 2 decimales; negativo si el medio da descuento (ej. "-5.00"). */
+  porcentajeAplicado: string;
+  montoFinal: string;
+};
+
+/** Venta en la respuesta. El tipo de comprobante se deduce de `estado`; no hay un campo aparte. */
+export type VentaConsultada = {
+  idVenta: number;
+  /** Nulo solo en datos anteriores al backfill. */
+  numeroComprobante: string | null;
+  /** Fecha y hora en formato ISO 8601. */
+  fechaHora: string;
+  /** Fecha y hora de pago en formato ISO 8601; nulo si es fiado. */
+  fechaHoraPago: string | null;
+  estado: EstadoVentaHistorial;
+  origen: OrigenVenta;
+  modalidadEntrega: ModalidadEntrega;
+  /** Nulo si la venta no tiene cliente asociado. */
+  clienteReferencia: string | null;
+  vendedor: VendedorVenta;
+  /** Montos como texto con 2 decimales. */
+  subtotalBruto: string;
+  descuentoManual: string;
+  montoTotal: string;
+  items: ItemVentaConsultado[];
+  /** Arreglo vacío si es un ticket de deuda (PENDIENTE_PAGO). */
+  pagos: PagoVentaConsultado[];
+};
+
+/** Respuesta exitosa de `GET /api/ventas/:idVenta`. */
+export type ConsultarVentaResponse = {
+  exito: true;
+  venta: VentaConsultada;
 };
