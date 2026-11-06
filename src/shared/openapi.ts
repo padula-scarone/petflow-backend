@@ -4,7 +4,9 @@ import {
   CANTIDAD_POR_PAGINA_MAXIMA,
   CANTIDAD_POR_PAGINA_PREDETERMINADA,
   consultarHistorialSchema,
+  consultarVentaSchema,
   ID_PRODUCTO_MAXIMO,
+  ID_VENTA_MAXIMO,
   PAGINA_MAXIMA,
   registrarVentaSchema,
 } from "../modules/ventas/ventas.schemas.js";
@@ -197,6 +199,145 @@ const historialConsultado = {
   required: ["exito", "ventas", "paginacion"],
 };
 
+/** Error de validación (400) del parámetro de ruta de la consulta de una venta: mismo formato, con su mensaje propio. */
+const errorValidacionConsultaVenta = {
+  ...errorValidacion,
+  properties: {
+    ...errorValidacion.properties,
+    mensaje: { type: "string", example: "Parámetros de ruta inválidos" },
+    errores: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          campo: { type: "string", example: "idVenta" },
+          mensaje: { type: "string" },
+        },
+      },
+    },
+  },
+};
+
+/** Respuesta 404 de `GET /api/ventas/:idVenta`: la venta no existe. */
+const ventaInexistente = {
+  type: "object",
+  properties: {
+    exito: { type: "boolean", example: false },
+    mensaje: { type: "string", example: "La venta 999 no existe" },
+  },
+};
+
+/** Respuesta exitosa de `GET /api/ventas/:idVenta` (ver `ConsultarVentaResponse`). Sin costo congelado, montoRecibido ni vuelto. */
+const ventaConsultada = {
+  type: "object",
+  properties: {
+    exito: { type: "boolean", example: true },
+    venta: {
+      type: "object",
+      properties: {
+        idVenta: { type: "integer", example: 10 },
+        numeroComprobante: {
+          type: "string",
+          nullable: true,
+          example: "CMP-00000010",
+          description: "Nulo solo en datos anteriores al backfill",
+        },
+        fechaHora: { type: "string", format: "date-time" },
+        fechaHoraPago: {
+          type: "string",
+          format: "date-time",
+          nullable: true,
+          description: "Nulo si es fiado (PENDIENTE_PAGO)",
+        },
+        estado: {
+          type: "string",
+          enum: ["COMPLETADA", "PENDIENTE_PAGO", "ANULADA"],
+          description:
+            "COMPLETADA = ticket de pago (pagos y fechaHoraPago con valor). PENDIENTE_PAGO = ticket de deuda " +
+            "(pagos vacío y fechaHoraPago nulo). ANULADA se devuelve tal como quedó guardada",
+        },
+        origen: { type: "string", enum: ["MOSTRADOR", "DIGITAL"] },
+        modalidadEntrega: { type: "string", enum: ["RETIRO", "ENVIO"] },
+        clienteReferencia: { type: "string", nullable: true, example: "Maria Lopez" },
+        vendedor: {
+          type: "object",
+          properties: {
+            idUsuario: { type: "integer", example: 1 },
+            nombre: { type: "string", example: "Vendedor Demo" },
+          },
+          required: ["idUsuario", "nombre"],
+        },
+        subtotalBruto: { type: "string", example: "1500.00" },
+        descuentoManual: { type: "string", example: "0.00" },
+        montoTotal: { type: "string", example: "1425.00" },
+        items: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              idProducto: { type: "integer", example: 3 },
+              nombreProducto: { type: "string", example: "Alimento balanceado 15 kg" },
+              formatoVenta: { type: "string", enum: ["UNIDAD", "GRANEL"] },
+              cantidad: { type: "string", example: "2.500", description: "Texto con 3 decimales" },
+              precioUnitario: { type: "string", example: "600.00", description: "Precio congelado al registrar la venta" },
+              subtotal: { type: "string", example: "1500.00" },
+            },
+            required: ["idProducto", "nombreProducto", "formatoVenta", "cantidad", "precioUnitario", "subtotal"],
+          },
+        },
+        pagos: {
+          type: "array",
+          description: "Arreglo vacío en un fiado (PENDIENTE_PAGO)",
+          items: {
+            type: "object",
+            properties: {
+              idMedioPago: { type: "integer", example: 2 },
+              nombreMedioPago: { type: "string", example: "Transferencia" },
+              montoBase: { type: "string", example: "1500.00" },
+              porcentajeAplicado: {
+                type: "string",
+                example: "-5.00",
+                description: "Ajuste neto (recargo − descuento) congelado al registrar; negativo si el medio da descuento",
+              },
+              montoFinal: { type: "string", example: "1425.00" },
+            },
+            required: ["idMedioPago", "nombreMedioPago", "montoBase", "porcentajeAplicado", "montoFinal"],
+          },
+        },
+      },
+      required: [
+        "idVenta",
+        "numeroComprobante",
+        "fechaHora",
+        "fechaHoraPago",
+        "estado",
+        "origen",
+        "modalidadEntrega",
+        "clienteReferencia",
+        "vendedor",
+        "subtotalBruto",
+        "descuentoManual",
+        "montoTotal",
+        "items",
+        "pagos",
+      ],
+    },
+  },
+  required: ["exito", "venta"],
+};
+
+// --- PARÁMETRO DE RUTA DE LA CONSULTA DE UNA VENTA ---
+
+// El parámetro se deriva del esquema Zod real, igual que los del historial, para que no se desactualice
+const esquemaConsultaVenta = z.toJSONSchema(consultarVentaSchema, { io: "input", target: "draft-7" });
+const parametroIdVenta = {
+  name: "idVenta",
+  in: "path",
+  required: true,
+  description: `Id de la venta: entero positivo (máximo ${ID_VENTA_MAXIMO}), por ejemplo el que devuelve el historial.`,
+  schema: (esquemaConsultaVenta.properties ?? {}).idVenta,
+};
+
 // --- PARÁMETROS DEL HISTORIAL ---
 
 /**
@@ -344,6 +485,35 @@ export const openapiDocument = {
           "409": {
             description: "No hay una caja abierta",
             content: { "application/json": { schema: errorNegocio } },
+          },
+          ...respuestasProteccion,
+        },
+      },
+    },
+    "/api/ventas/{idVenta}": {
+      get: {
+        tags: ["Ventas"],
+        security: [{ bearerAuth: [] }],
+        summary: "Consultar una venta (detalle del comprobante)",
+        description:
+          "Detalle de una venta con sus ítems y pagos, en cualquier estado (incluida ANULADA). " +
+          "Los importes salen tal como se guardaron: precio unitario y porcentaje aplicado de ese momento. " +
+          "El tipo de comprobante se deduce de `estado`. No devuelve el costo congelado ni montoRecibido/vuelto. " +
+          "Solo lectura: no modifica stock, caja ni estado. Cualquier rol autorizado ve cualquier venta " +
+          "(VENDEDOR, GESTOR_COMERCIAL o GERENTE); no exige caja abierta.",
+        parameters: [parametroIdVenta],
+        responses: {
+          "200": {
+            description: "Detalle de la venta",
+            content: { "application/json": { schema: ventaConsultada } },
+          },
+          "400": {
+            description: "`idVenta` inválido (no es un entero positivo)",
+            content: { "application/json": { schema: errorValidacionConsultaVenta } },
+          },
+          "404": {
+            description: "La venta no existe",
+            content: { "application/json": { schema: ventaInexistente } },
           },
           ...respuestasProteccion,
         },

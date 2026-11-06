@@ -9,6 +9,7 @@ import type {
   ProductoVigente,
   RegistrarVentaInput,
   TotalesVentaCalculados,
+  VentaDetallada,
 } from "./ventas.types.js";
 
 // --- TIPOS DEL REPOSITORIO ---
@@ -248,6 +249,88 @@ export async function buscarHistorialVentas(
       modalidadEntrega: fila.modalidadEntrega,
     })),
     totalRegistros,
+  };
+}
+
+// --- CONSULTA DE UNA VENTA ---
+
+/**
+ * Busca una venta por id con sus ítems y pagos. Es solo lectura: no usa `$transaction`.
+ * El `select` pide únicamente lo que el contrato devuelve; el costo congelado, `montoRecibido` y `vuelto`
+ * nunca salen de la base. Ítems y pagos van ordenados por id para que la respuesta sea determinista.
+ * @param idVenta Id de la venta, ya validado.
+ * @returns La venta, o `null` si no existe (el service decide el 404).
+ */
+export async function buscarVentaPorId(idVenta: number): Promise<VentaDetallada | null> {
+  const venta = await prisma.venta.findUnique({
+    where: { idVenta },
+    select: {
+      idVenta: true,
+      numeroComprobante: true,
+      fechaHora: true,
+      fechaHoraPago: true,
+      estado: true,
+      origen: true,
+      modalidadEntrega: true,
+      clienteReferencia: true,
+      subtotalBruto: true,
+      descuentoManual: true,
+      montoTotal: true,
+      usuario: { select: { idUsuario: true, nombre: true } },
+      detalles: {
+        orderBy: { idDetalle: "asc" },
+        select: {
+          cantidad: true,
+          precioUnitarioVigente: true,
+          subtotal: true,
+          producto: { select: { idProducto: true, nombre: true, formatoVenta: true } },
+        },
+      },
+      pagos: {
+        orderBy: { idPagoVenta: "asc" },
+        select: {
+          montoBase: true,
+          porcentajeAplicado: true,
+          montoFinal: true,
+          medioPago: { select: { idMedioPago: true, nombre: true } },
+        },
+      },
+    },
+  });
+
+  if (venta === null) {
+    return null;
+  }
+
+  // Se convierte lo leído (Decimal) a enteros para que el service formatee sin coma flotante
+  return {
+    idVenta: venta.idVenta,
+    numeroComprobante: venta.numeroComprobante,
+    fechaHora: venta.fechaHora,
+    fechaHoraPago: venta.fechaHoraPago,
+    estado: venta.estado,
+    origen: venta.origen,
+    modalidadEntrega: venta.modalidadEntrega,
+    clienteReferencia: venta.clienteReferencia,
+    vendedor: { idUsuario: venta.usuario.idUsuario, nombre: venta.usuario.nombre },
+    subtotalBrutoCentavos: aCentavos(venta.subtotalBruto),
+    descuentoManualCentavos: aCentavos(venta.descuentoManual),
+    montoTotalCentavos: aCentavos(venta.montoTotal),
+    items: venta.detalles.map((detalle) => ({
+      idProducto: detalle.producto.idProducto,
+      nombreProducto: detalle.producto.nombre,
+      formatoVenta: detalle.producto.formatoVenta,
+      cantidadMilesimas: aMilesimas(detalle.cantidad),
+      precioUnitarioCentavos: aCentavos(detalle.precioUnitarioVigente),
+      subtotalCentavos: aCentavos(detalle.subtotal),
+    })),
+    pagos: venta.pagos.map((pago) => ({
+      idMedioPago: pago.medioPago.idMedioPago,
+      nombreMedioPago: pago.medioPago.nombre,
+      montoBaseCentavos: aCentavos(pago.montoBase),
+      porcentajeAplicadoBp: aBasisPoints(pago.porcentajeAplicado),
+      montoFinalCentavos: aCentavos(pago.montoFinal),
+    })),
   };
 }
 
