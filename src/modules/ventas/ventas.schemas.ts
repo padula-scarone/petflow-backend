@@ -3,6 +3,12 @@ import { z } from "zod";
 // --- HELPERS DE VALIDACIÓN ---
 
 /**
+ * Máximo de una columna integer de PostgreSQL. Un id mayor haría fallar la consulta con 500,
+ * así que los ids del body se acotan aquí y responden 400. Va primero porque se evalúa al cargar el módulo.
+ */
+const ID_ENTERO_MAXIMO = 2_147_483_647;
+
+/**
  * Crea un validador que acepta hasta `decimales` posiciones decimales.
  * Se compara contra un margen mínimo porque los números de JS no representan decimales exactos.
  */
@@ -37,7 +43,7 @@ const decimalesMonto = conDecimalesMaximos(2);
 
 /** Un producto solicitado y su cantidad (admite decimales para productos a granel). */
 const itemVentaSchema = z.object({
-  idProducto: z.number().int().positive(),
+  idProducto: z.number().int().positive().max(ID_ENTERO_MAXIMO),
   cantidad: z
     .number()
     .positive()
@@ -46,7 +52,7 @@ const itemVentaSchema = z.object({
 
 /** Un pago parcial: el medio utilizado y la porción base que aporta (sin recargo). */
 const pagoVentaSchema = z.object({
-  idMedioPago: z.number().int().positive(),
+  idMedioPago: z.number().int().positive().max(ID_ENTERO_MAXIMO),
   monto: z
     .number()
     .positive()
@@ -64,7 +70,7 @@ export const registrarVentaSchema = z
     origen: z.enum(["MOSTRADOR", "DIGITAL"]),
     modalidadEntrega: z.enum(["RETIRO", "ENVIO"]),
     // TEMPORAL: hasta que exista Login (6.1) el vendedor llega en el body
-    idUsuario: z.number().int().positive(),
+    idUsuario: z.number().int().positive().max(ID_ENTERO_MAXIMO),
     clienteReferencia: z.string().trim().min(1).max(100).optional(),
     items: z.array(itemVentaSchema).min(1),
     pagos: z.array(pagoVentaSchema),
