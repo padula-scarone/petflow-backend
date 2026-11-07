@@ -11,6 +11,24 @@ function conDecimalesMaximos(decimales: number) {
   return (valor: number) => Math.abs(Math.round(valor * factor) - valor * factor) < 1e-6;
 }
 
+/**
+ * Reporta como error cada repetición posterior a la primera aparición de un medio de pago.
+ * La BD tiene unique (id_venta, id_medio_pago): un medio solo puede aparecer una vez por venta.
+ * Es compartida por el alta de venta y por el cobro de un fiado.
+ */
+function validarMediosNoRepetidos(pagos: ReadonlyArray<{ idMedioPago: number }>, contexto: z.RefinementCtx): void {
+  pagos.forEach((pago, index) => {
+    const repetido = pagos.findIndex((otro) => otro.idMedioPago === pago.idMedioPago);
+    if (repetido !== index) {
+      contexto.addIssue({
+        code: "custom",
+        path: ["pagos", index, "idMedioPago"],
+        message: "Un medio de pago no puede repetirse en la misma venta",
+      });
+    }
+  });
+}
+
 // Cantidades: decimal(10,3) en BD. Montos: decimal(12,2) en BD.
 const decimalesCantidad = conDecimalesMaximos(3);
 const decimalesMonto = conDecimalesMaximos(2);
@@ -79,17 +97,7 @@ export const registrarVentaSchema = z
       }
     });
 
-    // La BD tiene unique (id_venta, id_medio_pago): un medio solo puede aparecer una vez
-    data.pagos.forEach((pago, index) => {
-      const repetido = data.pagos.findIndex((otro) => otro.idMedioPago === pago.idMedioPago);
-      if (repetido !== index) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["pagos", index, "idMedioPago"],
-          message: "Un medio de pago no puede repetirse en la misma venta",
-        });
-      }
-    });
+    validarMediosNoRepetidos(data.pagos, ctx);
   });
 
 // --- CONSULTA DE HISTORIAL: CONSTANTES ---

@@ -12,6 +12,7 @@ import type {
   ItemVentaDetallado,
   MedioPagoVigente,
   PagoVentaConsultado,
+  PagoVentaCalculado,
   PagoVentaDetallado,
   ProductoVigente,
   RegistrarVentaInput,
@@ -76,7 +77,6 @@ export function calcularVenta(
   medios: MedioPagoVigente[],
 ): TotalesVentaCalculados {
   const productosPorId = new Map(productos.map((producto) => [producto.idProducto, producto]));
-  const mediosPorId = new Map(medios.map((medio) => [medio.idMedioPago, medio]));
 
   // Cada línea congela precio y costo vigentes: cambios futuros de precio no alteran ventas pasadas
   const lineas = input.items.map((item) => {
@@ -130,9 +130,41 @@ export function calcularVenta(
     };
   }
 
+  const pagos = calcularPagosVenta(input.pagos, medios, aCobrarCentavos);
+
+  return {
+    lineas,
+    pagos,
+    subtotalBrutoCentavos,
+    descuentoManualCentavos,
+    // El total es lo que paga el cliente, recargos incluidos
+    montoTotalCentavos: pagos.reduce((suma, pago) => suma + pago.montoFinalCentavos, 0),
+    estado: "COMPLETADA",
+  };
+}
+
+// --- CÁLCULO PURO DE PAGOS ---
+
+/**
+ * Aplica a cada pago el ajuste vigente de su medio y verifica que las porciones base cuadren con el importe.
+ * Es compartida por el alta de venta y por el cobro de un fiado: ambos calculan los pagos igual.
+ * @param pagosSolicitados Pagos del cuerpo: medio y porción base en pesos.
+ * @param medios Medios de pago leídos de la BD (puede traer más datos que los usados aquí).
+ * @param importeCentavos Importe que los pagos deben cubrir exactamente, antes de recargos o descuentos.
+ * @returns Un pago calculado por cada pago solicitado, en el mismo orden.
+ * @throws {ErrorNegocio} Medio inexistente (404), medio inactivo o con ajuste inválido (400),
+ * o suma de porciones base distinta del importe (400). Se lanza como objeto puro, no como Error.
+ */
+export function calcularPagosVenta(
+  pagosSolicitados: ReadonlyArray<{ idMedioPago: number; monto: number }>,
+  medios: MedioPagoVigente[],
+  importeCentavos: number,
+): PagoVentaCalculado[] {
+  const mediosPorId = new Map(medios.map((medio) => [medio.idMedioPago, medio]));
+
   // El monto de cada pago es la porción base que aporta ese medio.
   // El recargo (o descuento) del medio se aplica sobre esa porción: final = base × (1 + neto)
-  const pagos = input.pagos.map((pago) => {
+  const pagos = pagosSolicitados.map((pago) => {
     const medio = mediosPorId.get(pago.idMedioPago);
     if (!medio) {
       throw crearErrorNegocio(`El medio de pago ${pago.idMedioPago} no existe`, 404);
@@ -156,22 +188,14 @@ export function calcularVenta(
 
   // El cuadre se hace sobre las porciones base: es exacto y no depende de redondeos del recargo
   const sumaBaseCentavos = pagos.reduce((suma, pago) => suma + pago.montoBaseCentavos, 0);
-  if (sumaBaseCentavos !== aCobrarCentavos) {
+  if (sumaBaseCentavos !== importeCentavos) {
     throw crearErrorNegocio(
-      `La suma de los pagos (${formatearCentavos(sumaBaseCentavos)}) no coincide con el total a cobrar (${formatearCentavos(aCobrarCentavos)})`,
+      `La suma de los pagos (${formatearCentavos(sumaBaseCentavos)}) no coincide con el total a cobrar (${formatearCentavos(importeCentavos)})`,
       400,
     );
   }
 
-  return {
-    lineas,
-    pagos,
-    subtotalBrutoCentavos,
-    descuentoManualCentavos,
-    // El total es lo que paga el cliente, recargos incluidos
-    montoTotalCentavos: pagos.reduce((suma, pago) => suma + pago.montoFinalCentavos, 0),
-    estado: "COMPLETADA",
-  };
+  return pagos;
 }
 
 // --- UTILIDADES DE MONEDA Y CANTIDAD ---
