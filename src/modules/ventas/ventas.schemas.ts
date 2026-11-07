@@ -3,12 +3,36 @@ import { z } from "zod";
 // --- HELPERS DE VALIDACIÓN ---
 
 /**
+ * Máximo de una columna integer de PostgreSQL. Un id mayor haría fallar la consulta con 500,
+ * así que los ids del body se acotan aquí y responden 400. Va primero porque se evalúa al cargar el módulo.
+ */
+const ID_ENTERO_MAXIMO = 2_147_483_647;
+
+/**
  * Crea un validador que acepta hasta `decimales` posiciones decimales.
  * Se compara contra un margen mínimo porque los números de JS no representan decimales exactos.
  */
 function conDecimalesMaximos(decimales: number) {
   const factor = 10 ** decimales;
   return (valor: number) => Math.abs(Math.round(valor * factor) - valor * factor) < 1e-6;
+}
+
+/**
+ * Reporta como error cada repetición posterior a la primera aparición de un medio de pago.
+ * La BD tiene unique (id_venta, id_medio_pago): un medio solo puede aparecer una vez por venta.
+ * Es compartida por el alta de venta y por el cobro de un fiado.
+ */
+function validarMediosNoRepetidos(pagos: ReadonlyArray<{ idMedioPago: number }>, contexto: z.RefinementCtx): void {
+  pagos.forEach((pago, index) => {
+    const repetido = pagos.findIndex((otro) => otro.idMedioPago === pago.idMedioPago);
+    if (repetido !== index) {
+      contexto.addIssue({
+        code: "custom",
+        path: ["pagos", index, "idMedioPago"],
+        message: "Un medio de pago no puede repetirse en la misma venta",
+      });
+    }
+  });
 }
 
 // Cantidades: decimal(10,3) en BD. Montos: decimal(12,2) en BD.
@@ -19,7 +43,7 @@ const decimalesMonto = conDecimalesMaximos(2);
 
 /** Un producto solicitado y su cantidad (admite decimales para productos a granel). */
 const itemVentaSchema = z.object({
-  idProducto: z.number().int().positive(),
+  idProducto: z.number().int().positive().max(ID_ENTERO_MAXIMO),
   cantidad: z
     .number()
     .positive()
@@ -28,7 +52,7 @@ const itemVentaSchema = z.object({
 
 /** Un pago parcial: el medio utilizado y la porción base que aporta (sin recargo). */
 const pagoVentaSchema = z.object({
-  idMedioPago: z.number().int().positive(),
+  idMedioPago: z.number().int().positive().max(ID_ENTERO_MAXIMO),
   monto: z
     .number()
     .positive()
@@ -46,7 +70,7 @@ export const registrarVentaSchema = z
     origen: z.enum(["MOSTRADOR", "DIGITAL"]),
     modalidadEntrega: z.enum(["RETIRO", "ENVIO"]),
     // TEMPORAL: hasta que exista Login (6.1) el vendedor llega en el body
-    idUsuario: z.number().int().positive(),
+    idUsuario: z.number().int().positive().max(ID_ENTERO_MAXIMO),
     clienteReferencia: z.string().trim().min(1).max(100).optional(),
     items: z.array(itemVentaSchema).min(1),
     pagos: z.array(pagoVentaSchema),
@@ -79,17 +103,39 @@ export const registrarVentaSchema = z
       }
     });
 
-    // La BD tiene unique (id_venta, id_medio_pago): un medio solo puede aparecer una vez
-    data.pagos.forEach((pago, index) => {
-      const repetido = data.pagos.findIndex((otro) => otro.idMedioPago === pago.idMedioPago);
-      if (repetido !== index) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["pagos", index, "idMedioPago"],
-          message: "Un medio de pago no puede repetirse en la misma venta",
-        });
-      }
-    });
+    validarMediosNoRepetidos(data.pagos, ctx);
+  });
+
+// --- COBRO DE FIADO: CONSTANTES ---
+
+/** Tope de `montoRecibido`: máximo de una columna decimal(12,2); más allá, la BD falla con 500. */
+export const MONTO_RECIBIDO_MAXIMO = 9_999_999_999.99;
+
+// --- COBRO DE FIADO: ESQUEMAS ---
+
+/**
+ * Un pago del cobro: como el del alta, más el monto recibido opcional.
+ * `montoRecibido` solo corresponde a un medio en efectivo, pero eso lo valida el service (el esquema no conoce el tipo del medio).
+ */
+const pagoCobroFiadoSchema = pagoVentaSchema.extend({
+  montoRecibido: z
+    .number()
+    .positive()
+    .max(MONTO_RECIBIDO_MAXIMO)
+    .refine(decimalesMonto, "El monto recibido admite hasta 2 decimales")
+    .optional(),
+});
+
+/**
+ * Contrato de entrada del body de `POST /api/ventas/:idVenta/cobro`.
+ * El front no envía total ni vuelto: los calcula el servidor. El cobro es total, así que `pagos` no puede venir vacío.
+ */
+export const liquidarFiadoSchema = z
+  .object({
+    pagos: z.array(pagoCobroFiadoSchema).min(1),
+  })
+  .superRefine((data, ctx) => {
+    validarMediosNoRepetidos(data.pagos, ctx);
   });
 
 // --- CONSULTA DE HISTORIAL: CONSTANTES ---
@@ -192,5 +238,15 @@ export const consultarHistorialSchema = z
  * Llega como texto y se convierte de forma estricta, igual que la query del historial.
  */
 export const consultarVentaSchema = z.object({
+  idVenta: enteroDesdeTexto(1, ID_VENTA_MAXIMO),
+});
+
+// --- COBRO DE FIADO: PARÁMETRO DE RUTA ---
+
+/**
+ * Contrato de entrada del parámetro de ruta de `POST /api/ventas/:idVenta/cobro`.
+ * Va después de `ID_VENTA_MAXIMO` y `enteroDesdeTexto` porque se evalúa al cargar el módulo.
+ */
+export const liquidarFiadoParametrosSchema = z.object({
   idVenta: enteroDesdeTexto(1, ID_VENTA_MAXIMO),
 });

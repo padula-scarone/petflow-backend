@@ -39,6 +39,23 @@ export function crearErrorStockInsuficiente(idProducto: number): ErrorNegocio {
   return crearErrorNegocio(`Stock insuficiente para el producto ${idProducto}`, 409);
 }
 
+/**
+ * Crea el error de intentar cobrar una venta que no es un fiado pendiente (ya cobrada o anulada).
+ * Usa 409 porque el pedido es válido pero choca con el estado actual de la venta.
+ * @param idVenta Id de la venta que no está pendiente de pago.
+ */
+export function crearErrorVentaNoPendientePago(idVenta: number): ErrorNegocio {
+  return crearErrorNegocio(`La venta ${idVenta} no está pendiente de pago`, 409);
+}
+
+/**
+ * Crea el error de un cobro simultáneo: otra operación cambió el estado de la venta entre la lectura y la escritura.
+ * @param idVenta Id de la venta que ya no estaba pendiente de pago al momento de cobrarla.
+ */
+export function crearErrorDobleCobro(idVenta: number): ErrorNegocio {
+  return crearErrorNegocio(`La venta ${idVenta} ya fue cobrada o cambió de estado`, 409);
+}
+
 // --- GUARDA DE TIPO ---
 
 /**

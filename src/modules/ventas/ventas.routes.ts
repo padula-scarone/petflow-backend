@@ -1,6 +1,11 @@
 import { Router } from "express";
 import { requerirRol } from "../auth/auth.middleware.js";
-import { getConsultarHistorial, getConsultarVenta, postRegistrarVenta } from "./ventas.controller.js";
+import {
+  getConsultarHistorial,
+  getConsultarVenta,
+  postLiquidarFiado,
+  postRegistrarVenta,
+} from "./ventas.controller.js";
 
 // --- RUTAS ---
 
@@ -15,3 +20,6 @@ ventasRouter.get("/", requerirRol("VENDEDOR", "GESTOR_COMERCIAL", "GERENTE"), ge
 
 // GET /api/ventas/:idVenta: detalle de una venta con ítems y pagos. Requiere sesión validada; no exige caja abierta
 ventasRouter.get("/:idVenta", requerirRol("VENDEDOR", "GESTOR_COMERCIAL", "GERENTE"), getConsultarVenta);
+
+// POST /api/ventas/:idVenta/cobro: liquidar un fiado (cobro total, sin límite de tiempo). Requiere sesión validada y caja abierta (CUB 1.2)
+ventasRouter.post("/:idVenta/cobro", requerirRol("VENDEDOR", "GESTOR_COMERCIAL", "GERENTE"), postLiquidarFiado);

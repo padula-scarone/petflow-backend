@@ -1,14 +1,19 @@
 import type { Prisma } from "../../generated/prisma/client.js";
 import { prisma } from "../../shared/prisma.js";
-import { crearErrorNegocio, crearErrorStockInsuficiente } from "./ventas.errors.js";
+import { crearErrorDobleCobro, crearErrorNegocio, crearErrorStockInsuficiente } from "./ventas.errors.js";
 import type {
+  CobroFiadoCalculado,
+  CobroFiadoPersistido,
   EstadoVenta,
   FiltroHistorialVentas,
+  LiquidarFiadoInput,
+  MedioPagoCobrable,
   MedioPagoVigente,
   PaginaHistorialVentas,
   ProductoVigente,
   RegistrarVentaInput,
   TotalesVentaCalculados,
+  VentaAdeudada,
   VentaDetallada,
 } from "./ventas.types.js";
 
@@ -29,6 +34,9 @@ type CalcularVenta = (
   productos: ProductoVigente[],
   medios: MedioPagoVigente[],
 ) => TotalesVentaCalculados;
+
+/** Función de cálculo del cobro que inyecta el service; recibe la venta (o `null`) y los medios leídos. */
+type CalcularCobroFiado = (venta: VentaAdeudada | null, medios: MedioPagoCobrable[]) => CobroFiadoCalculado;
 
 // --- ALTA DE VENTA ---
 
@@ -167,6 +175,107 @@ export async function registrarVentaAtomica(
       montoTotalCentavos: calculo.montoTotalCentavos,
       estado: calculo.estado,
       fechaHora: venta.fechaHora,
+    };
+  });
+}
+
+// --- COBRO DE FIADO ---
+
+/**
+ * Cobra un fiado en una única transacción.
+ * Es la única capa que toca Prisma en esta acción. Si algo falla (venta, caja, doble cobro, BD)
+ * se revierte todo: no queda la venta cobrada a medias ni pagos sueltos.
+ * Usa el nivel de aislamiento predeterminado (READ COMMITTED) a propósito: ante dos cobros simultáneos,
+ * el segundo espera el bloqueo de fila del primero y luego ve el estado ya cambiado (409), sin error de serialización.
+ * @param input Parámetro de ruta y body validados.
+ * @param calcular Cálculo de negocio, ejecutado dentro de la transacción con datos recién leídos.
+ * @returns Los datos del cobro persistido.
+ * @throws {ErrorNegocio} Las del cálculo (404/409/400), no hay caja abierta (409) o
+ * otro cobro cambió el estado de la venta antes de este (409). Se lanza como objeto puro, no como Error.
+ */
+export async function liquidarFiadoAtomico(
+  input: LiquidarFiadoInput,
+  calcular: CalcularCobroFiado,
+): Promise<CobroFiadoPersistido> {
+  return prisma.$transaction(async (tx) => {
+    // --- LECTURA Y CÁLCULO ---
+    const ventaLeida = await tx.venta.findUnique({
+      where: { idVenta: input.idVenta },
+      select: { idVenta: true, numeroComprobante: true, estado: true, subtotalBruto: true, descuentoManual: true },
+    });
+    const medios = await tx.medioPago.findMany({
+      where: { idMedioPago: { in: input.pagos.map((pago) => pago.idMedioPago) } },
+    });
+
+    // Se convierte lo leído (Decimal) a enteros antes de calcular, para no operar con decimales
+    const calculo = calcular(
+      ventaLeida === null
+        ? null
+        : {
+            idVenta: ventaLeida.idVenta,
+            numeroComprobante: ventaLeida.numeroComprobante,
+            estado: ventaLeida.estado,
+            subtotalBrutoCentavos: aCentavos(ventaLeida.subtotalBruto),
+            descuentoManualCentavos: aCentavos(ventaLeida.descuentoManual),
+          },
+      medios.map((medio) => ({
+        idMedioPago: medio.idMedioPago,
+        tipo: medio.tipo,
+        activo: medio.estado === "ACTIVO",
+        ajusteBp: aBasisPoints(medio.porcentajeRecargo) - aBasisPoints(medio.porcentajeDescuento),
+      })),
+    );
+
+    // --- CAJA ---
+    // El ingreso va a la caja abierta del día en curso, no a la del día del fiado (que no tenía caja).
+    // La caja se simula como siempre abierta: se toma la más reciente, igual que en el alta.
+    const caja = await tx.sesionCaja.findFirst({
+      where: { estado: "ABIERTA" },
+      orderBy: { fechaApertura: "desc" },
+      select: { idCaja: true },
+    });
+    if (!caja) {
+      throw crearErrorNegocio("No hay una caja abierta para registrar el cobro", 409);
+    }
+
+    // --- CAMBIO DE ESTADO CONDICIONADO ---
+    // Va ANTES de crear los pagos: toma el bloqueo de la fila. Si otro cobro simultáneo ya la cambió,
+    // el where no coincide y count vale 0: se aborta con 409 sin llegar a duplicar pagos (unique idVenta+idMedioPago).
+    const fechaHoraPago = new Date();
+    const actualizadas = await tx.venta.updateMany({
+      where: { idVenta: input.idVenta, estado: "PENDIENTE_PAGO" },
+      data: {
+        estado: "COMPLETADA",
+        fechaHoraPago,
+        idCaja: caja.idCaja,
+        montoTotal: centavosAString(calculo.montoTotalCentavos),
+      },
+    });
+    if (actualizadas.count !== 1) {
+      throw crearErrorDobleCobro(input.idVenta);
+    }
+
+    // --- GUARDADO DE LOS PAGOS ---
+    // El numeroComprobante no se toca: el recibo conserva el número del ticket de deuda
+    await tx.pagoVenta.createMany({
+      data: calculo.pagos.map((pago) => ({
+        idVenta: input.idVenta,
+        idMedioPago: pago.idMedioPago,
+        montoBase: centavosAString(pago.montoBaseCentavos),
+        porcentajeAplicado: basisPointsAString(pago.porcentajeAplicadoBp),
+        montoFinal: centavosAString(pago.montoFinalCentavos),
+        // Nulos si el medio no es efectivo o no se informó el recibido
+        montoRecibido: pago.montoRecibidoCentavos === null ? null : centavosAString(pago.montoRecibidoCentavos),
+        vuelto: pago.vueltoCentavos === null ? null : centavosAString(pago.vueltoCentavos),
+      })),
+    });
+
+    return {
+      idVenta: input.idVenta,
+      numeroComprobante: calculo.numeroComprobante,
+      montoTotalCentavos: calculo.montoTotalCentavos,
+      fechaHoraPago,
+      pagos: calculo.pagos,
     };
   });
 }

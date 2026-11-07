@@ -1,7 +1,13 @@
 import type { Request, Response } from "express";
 import { esErrorNegocio } from "./ventas.errors.js";
-import { consultarHistorialSchema, consultarVentaSchema, registrarVentaSchema } from "./ventas.schemas.js";
-import { consultarHistorial, consultarVenta, registrarVenta } from "./ventas.service.js";
+import {
+  consultarHistorialSchema,
+  consultarVentaSchema,
+  liquidarFiadoParametrosSchema,
+  liquidarFiadoSchema,
+  registrarVentaSchema,
+} from "./ventas.schemas.js";
+import { consultarHistorial, consultarVenta, liquidarFiado, registrarVenta } from "./ventas.service.js";
 
 // --- FUNCIONES AUXILIARES ---
 
@@ -104,6 +110,40 @@ export async function getConsultarVenta(req: Request, res: Response): Promise<vo
     res.status(200).json(resultado);
   } catch (errorCapturado) {
     // Igual que en los otros handlers: el 404 de negocio se traduce y cualquier otro valor sube a Express
+    if (esErrorNegocio(errorCapturado)) {
+      res.status(errorCapturado.status).json({ exito: false, mensaje: errorCapturado.mensaje });
+      return;
+    }
+    throw errorCapturado;
+  }
+}
+
+/**
+ * Handler de `POST /api/ventas/:idVenta/cobro`: cobra un fiado (liquidar fiado).
+ * Valida el parámetro de ruta y el body, y delega en el service. No contiene reglas de negocio.
+ * La sesión y el rol los exige `requerirRol` en la ruta, no este handler.
+ * Respuestas: 200 si se cobra; 400 con detalle por campo si los datos son inválidos o falla una regla de negocio;
+ * 404 si la venta no existe; 409 si no está pendiente de pago, no hay caja abierta o hubo un doble cobro.
+ */
+export async function postLiquidarFiado(req: Request, res: Response): Promise<void> {
+  // El parámetro de ruta llega como texto: el esquema lo convierte de forma estricta
+  const parseoParametros = liquidarFiadoParametrosSchema.safeParse(req.params);
+  if (!parseoParametros.success) {
+    res.status(400).json(construirRespuestaValidacion("Parámetros de ruta inválidos", parseoParametros.error.issues));
+    return;
+  }
+
+  const parseoCuerpo = liquidarFiadoSchema.safeParse(req.body);
+  if (!parseoCuerpo.success) {
+    res.status(400).json(construirRespuestaValidacion("Datos de cobro inválidos", parseoCuerpo.error.issues));
+    return;
+  }
+
+  try {
+    const resultado = await liquidarFiado({ ...parseoParametros.data, ...parseoCuerpo.data });
+    res.status(200).json(resultado);
+  } catch (errorCapturado) {
+    // Igual que en los otros handlers: los errores de negocio se traducen y cualquier otro valor sube a Express
     if (esErrorNegocio(errorCapturado)) {
       res.status(errorCapturado.status).json({ exito: false, mensaje: errorCapturado.mensaje });
       return;

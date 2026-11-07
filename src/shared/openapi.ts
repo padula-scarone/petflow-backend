@@ -7,6 +7,8 @@ import {
   consultarVentaSchema,
   ID_PRODUCTO_MAXIMO,
   ID_VENTA_MAXIMO,
+  liquidarFiadoSchema,
+  MONTO_RECIBIDO_MAXIMO,
   PAGINA_MAXIMA,
   registrarVentaSchema,
 } from "../modules/ventas/ventas.schemas.js";
@@ -326,6 +328,80 @@ const ventaConsultada = {
   required: ["exito", "venta"],
 };
 
+// --- COBRO DE FIADO ---
+
+/** Error de validación (400) del cobro de un fiado: mismo formato, con el mensaje y los campos propios del body. */
+const errorValidacionCobroFiado = {
+  ...errorValidacion,
+  properties: {
+    ...errorValidacion.properties,
+    mensaje: { type: "string", example: "Datos de cobro inválidos" },
+    errores: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          campo: { type: "string", example: "pagos.0.montoRecibido" },
+          mensaje: { type: "string" },
+        },
+      },
+    },
+  },
+};
+
+/** Respuesta exitosa de `POST /api/ventas/:idVenta/cobro` (ver `LiquidarFiadoResponse`). */
+const fiadoCobrado = {
+  type: "object",
+  properties: {
+    exito: { type: "boolean", example: true },
+    mensaje: { type: "string", example: "Fiado cobrado, venta completada y recibo de pago emitido" },
+    venta: {
+      type: "object",
+      properties: {
+        idVenta: { type: "integer", example: 10 },
+        numeroComprobante: {
+          type: "string",
+          nullable: true,
+          example: "CMP-00000010",
+          description: "El mismo del ticket de deuda: el comprobante pasa a ser un recibo de pago. Nulo solo en datos anteriores al backfill",
+        },
+        estado: { type: "string", enum: ["COMPLETADA"] },
+        montoTotal: {
+          type: "string",
+          example: "1650.00",
+          description: "Suma de los montos finales, con los recargos o descuentos de hoy; puede diferir del importe del fiado",
+        },
+        fechaHoraPago: { type: "string", format: "date-time" },
+        pagos: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              idMedioPago: { type: "integer", example: 1 },
+              montoFinal: { type: "string", example: "1650.00" },
+              montoRecibido: {
+                type: "string",
+                nullable: true,
+                example: "2000.00",
+                description: "Nulo si el medio no es efectivo o no se informó el monto recibido",
+              },
+              vuelto: {
+                type: "string",
+                nullable: true,
+                example: "350.00",
+                description: "Monto recibido menos monto final; nulo siempre que montoRecibido sea nulo",
+              },
+            },
+            required: ["idMedioPago", "montoFinal", "montoRecibido", "vuelto"],
+          },
+        },
+      },
+      required: ["idVenta", "numeroComprobante", "estado", "montoTotal", "fechaHoraPago", "pagos"],
+    },
+  },
+  required: ["exito", "mensaje", "venta"],
+};
+
 // --- PARÁMETRO DE RUTA DE LA CONSULTA DE UNA VENTA ---
 
 // El parámetro se deriva del esquema Zod real, igual que los del historial, para que no se desactualice
@@ -514,6 +590,58 @@ export const openapiDocument = {
           "404": {
             description: "La venta no existe",
             content: { "application/json": { schema: ventaInexistente } },
+          },
+          ...respuestasProteccion,
+        },
+      },
+    },
+    "/api/ventas/{idVenta}/cobro": {
+      post: {
+        tags: ["Ventas"],
+        security: [{ bearerAuth: [] }],
+        summary: "Liquidar un fiado (cobro)",
+        description:
+          "Cobra por completo una venta en estado `PENDIENTE_PAGO`, sin límite de tiempo. El front no envía el total ni el vuelto: " +
+          "el servidor calcula el importe adeudado (subtotal bruto menos descuento manual) y aplica a cada porción base " +
+          "el recargo o descuento VIGENTE HOY de su medio. Las porciones base de `pagos` deben sumar exactamente ese importe. " +
+          "`montoRecibido` es opcional y solo se admite en un medio EFECTIVO: debe ser mayor o igual al monto final de esa línea " +
+          "y el servidor calcula el vuelto. El ingreso a caja es siempre el monto final, nunca el recibido, y se asienta en la " +
+          "última caja abierta (la del día en curso, no la del día del fiado). La venta pasa a `COMPLETADA`, registra la fecha de " +
+          "pago, su `montoTotal` pasa a ser la suma de los montos finales y conserva el mismo `numeroComprobante`. " +
+          "Un fiado no puede cobrarse dos veces: ante cobros simultáneos, uno responde 409. " +
+          `El monto recibido admite hasta ${MONTO_RECIBIDO_MAXIMO} y 2 decimales.`,
+        parameters: [parametroIdVenta],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              // `io: "input"` describe lo que el cliente envía, no el resultado ya transformado
+              schema: z.toJSONSchema(liquidarFiadoSchema, { io: "input", target: "draft-7" }),
+            },
+          },
+        },
+        responses: {
+          "200": {
+            description: "Fiado cobrado: la venta queda COMPLETADA",
+            content: { "application/json": { schema: fiadoCobrado } },
+          },
+          "400": {
+            description:
+              "`idVenta` o body inválido, o regla de negocio incumplida (suma de pagos que no cuadra, " +
+              "`montoRecibido` menor al monto final o en un medio que no es efectivo, medio de pago inactivo)",
+            content: {
+              "application/json": {
+                schema: { oneOf: [errorValidacionConsultaVenta, errorValidacionCobroFiado, errorNegocio] },
+              },
+            },
+          },
+          "404": {
+            description: "La venta o un medio de pago no existe",
+            content: { "application/json": { schema: ventaInexistente } },
+          },
+          "409": {
+            description: "La venta no está PENDIENTE_PAGO, no hay una caja abierta, o se detectó un doble cobro",
+            content: { "application/json": { schema: errorNegocio } },
           },
           ...respuestasProteccion,
         },
