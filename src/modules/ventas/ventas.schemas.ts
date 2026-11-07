@@ -100,6 +100,38 @@ export const registrarVentaSchema = z
     validarMediosNoRepetidos(data.pagos, ctx);
   });
 
+// --- COBRO DE FIADO: CONSTANTES ---
+
+/** Tope de `montoRecibido`: máximo de una columna decimal(12,2); más allá, la BD falla con 500. */
+export const MONTO_RECIBIDO_MAXIMO = 9_999_999_999.99;
+
+// --- COBRO DE FIADO: ESQUEMAS ---
+
+/**
+ * Un pago del cobro: como el del alta, más el monto recibido opcional.
+ * `montoRecibido` solo corresponde a un medio en efectivo, pero eso lo valida el service (el esquema no conoce el tipo del medio).
+ */
+const pagoCobroFiadoSchema = pagoVentaSchema.extend({
+  montoRecibido: z
+    .number()
+    .positive()
+    .max(MONTO_RECIBIDO_MAXIMO)
+    .refine(decimalesMonto, "El monto recibido admite hasta 2 decimales")
+    .optional(),
+});
+
+/**
+ * Contrato de entrada del body de `POST /api/ventas/:idVenta/cobro`.
+ * El front no envía total ni vuelto: los calcula el servidor. El cobro es total, así que `pagos` no puede venir vacío.
+ */
+export const liquidarFiadoSchema = z
+  .object({
+    pagos: z.array(pagoCobroFiadoSchema).min(1),
+  })
+  .superRefine((data, ctx) => {
+    validarMediosNoRepetidos(data.pagos, ctx);
+  });
+
 // --- CONSULTA DE HISTORIAL: CONSTANTES ---
 
 /** Estados que se pueden filtrar en el historial. Incluye ANULADA: sin filtro se devuelven todos. */
@@ -200,5 +232,15 @@ export const consultarHistorialSchema = z
  * Llega como texto y se convierte de forma estricta, igual que la query del historial.
  */
 export const consultarVentaSchema = z.object({
+  idVenta: enteroDesdeTexto(1, ID_VENTA_MAXIMO),
+});
+
+// --- COBRO DE FIADO: PARÁMETRO DE RUTA ---
+
+/**
+ * Contrato de entrada del parámetro de ruta de `POST /api/ventas/:idVenta/cobro`.
+ * Va después de `ID_VENTA_MAXIMO` y `enteroDesdeTexto` porque se evalúa al cargar el módulo.
+ */
+export const liquidarFiadoParametrosSchema = z.object({
   idVenta: enteroDesdeTexto(1, ID_VENTA_MAXIMO),
 });

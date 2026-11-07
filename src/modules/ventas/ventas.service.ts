@@ -1,7 +1,9 @@
-import { buscarHistorialVentas, buscarVentaPorId, registrarVentaAtomica } from "./ventas.repository.js";
-import { crearErrorNegocio, crearErrorStockInsuficiente } from "./ventas.errors.js";
+import { buscarHistorialVentas, buscarVentaPorId, liquidarFiadoAtomico, registrarVentaAtomica } from "./ventas.repository.js";
+import { crearErrorNegocio, crearErrorStockInsuficiente, crearErrorVentaNoPendientePago } from "./ventas.errors.js";
 import { descomponerFechaCalendario } from "./ventas.schemas.js";
 import type {
+  CobroFiadoCalculado,
+  CobroFiadoPersistido,
   ConsultarHistorialInput,
   ConsultarHistorialResponse,
   ConsultarVentaInput,
@@ -10,7 +12,12 @@ import type {
   FiltroHistorialVentas,
   ItemVentaConsultado,
   ItemVentaDetallado,
+  LiquidarFiadoInput,
+  LiquidarFiadoResponse,
+  MedioPagoCobrable,
   MedioPagoVigente,
+  PagoCobrado,
+  PagoCobroCalculado,
   PagoVentaConsultado,
   PagoVentaCalculado,
   PagoVentaDetallado,
@@ -18,6 +25,7 @@ import type {
   RegistrarVentaInput,
   RegistrarVentaResponse,
   TotalesVentaCalculados,
+  VentaAdeudada,
   VentaDetallada,
   VentaHistorial,
 } from "./ventas.types.js";
@@ -386,4 +394,142 @@ function formatearMilesimas(milesimas: number): string {
  */
 function formatearBasisPoints(basisPoints: number): string {
   return (basisPoints / 100).toFixed(2);
+}
+
+// --- COBRO DE FIADO: ORQUESTACIÓN ---
+
+/**
+ * Cobra un fiado: calcula con reglas puras y persiste en una única transacción.
+ * El cálculo se inyecta al repositorio como función para que corra dentro de la transacción,
+ * con la venta leída en ese mismo momento.
+ * @param input Parámetro de ruta y body ya validados por Zod.
+ * @returns Respuesta lista para enviar al frontend.
+ * @throws {ErrorNegocio} Si alguna regla de negocio no se cumple (nada queda escrito).
+ */
+export async function liquidarFiado(input: LiquidarFiadoInput): Promise<LiquidarFiadoResponse> {
+  const cobro = await liquidarFiadoAtomico(input, (venta, medios) => calcularCobroFiado(input, venta, medios));
+
+  return {
+    exito: true,
+    mensaje: "Fiado cobrado, venta completada y recibo de pago emitido",
+    venta: convertirCobroPersistido(cobro),
+  };
+}
+
+// --- COBRO DE FIADO: CÁLCULO PURO ---
+
+/**
+ * Aplica las reglas de negocio del cobro de un fiado sin acceder a la base de datos.
+ * Es pura a propósito: así se prueba con datos de ejemplo sin conectarse a Supabase.
+ * @param input Parámetro de ruta y body validados.
+ * @param venta Venta leída de la BD, o `null` si no existe.
+ * @param medios Medios de pago leídos de la BD, con su tipo.
+ * @returns Pagos con vuelto, importe adeudado y total cobrado.
+ * @throws {ErrorNegocio} Venta inexistente (404), venta que no está pendiente de pago (409),
+ * medio inexistente (404), inactivo o con ajuste inválido (400), suma de pagos que no cuadra (400),
+ * monto recibido en un medio que no es efectivo (400) o menor al monto final (400).
+ * Se lanza como objeto puro, no como Error.
+ */
+export function calcularCobroFiado(
+  input: LiquidarFiadoInput,
+  venta: VentaAdeudada | null,
+  medios: MedioPagoCobrable[],
+): CobroFiadoCalculado {
+  if (venta === null) {
+    throw crearErrorNegocio(`La venta ${input.idVenta} no existe`, 404);
+  }
+  if (venta.estado !== "PENDIENTE_PAGO") {
+    throw crearErrorVentaNoPendientePago(venta.idVenta);
+  }
+
+  // Se cobra lo que se debe (subtotal − descuento) y no el montoTotal guardado:
+  // el cobro es total y el descuento manual solo se carga en el alta
+  const importeAdeudadoCentavos = venta.subtotalBrutoCentavos - venta.descuentoManualCentavos;
+  const pagosCalculados = calcularPagosVenta(input.pagos, medios, importeAdeudadoCentavos);
+
+  // Los medios no se repiten (lo garantiza el esquema), así que el medio identifica de forma única cada pago
+  const pagosCalculadosPorMedio = new Map(pagosCalculados.map((pago) => [pago.idMedioPago, pago]));
+  const tiposPorMedio = new Map(medios.map((medio) => [medio.idMedioPago, medio.tipo]));
+
+  const pagos = input.pagos.map((pagoSolicitado): PagoCobroCalculado => {
+    const pagoCalculado = pagosCalculadosPorMedio.get(pagoSolicitado.idMedioPago);
+    if (pagoCalculado === undefined) {
+      // Inalcanzable: calcularPagosVenta devuelve un pago por cada solicitado; es una defensa
+      throw crearErrorNegocio(`El medio de pago ${pagoSolicitado.idMedioPago} no se pudo calcular`, 400);
+    }
+    return {
+      ...pagoCalculado,
+      ...calcularMontoRecibidoYVuelto(
+        pagoSolicitado.idMedioPago,
+        tiposPorMedio.get(pagoSolicitado.idMedioPago),
+        pagoSolicitado.montoRecibido,
+        pagoCalculado.montoFinalCentavos,
+      ),
+    };
+  });
+
+  return {
+    pagos,
+    importeAdeudadoCentavos,
+    // El total es lo que paga el cliente, recargos incluidos; puede diferir del importe del fiado
+    montoTotalCentavos: pagos.reduce((suma, pago) => suma + pago.montoFinalCentavos, 0),
+    numeroComprobante: venta.numeroComprobante,
+  };
+}
+
+/**
+ * Valida el monto recibido de un pago y calcula su vuelto.
+ * Solo el efectivo admite monto recibido. Si no se informa, no se asume pago exacto: ambos quedan nulos.
+ * @param idMedioPago Medio del pago, para el mensaje de error.
+ * @param tipo Tipo del medio.
+ * @param montoRecibido Monto recibido en pesos, si el cliente lo informó.
+ * @param montoFinalCentavos Monto final de la línea, con el ajuste del medio ya aplicado.
+ * @throws {ErrorNegocio} 400 si el medio no es efectivo o el recibido no alcanza el monto final.
+ */
+function calcularMontoRecibidoYVuelto(
+  idMedioPago: number,
+  tipo: MedioPagoCobrable["tipo"] | undefined,
+  montoRecibido: number | undefined,
+  montoFinalCentavos: number,
+): Pick<PagoCobroCalculado, "montoRecibidoCentavos" | "vueltoCentavos"> {
+  if (montoRecibido === undefined) {
+    return { montoRecibidoCentavos: null, vueltoCentavos: null };
+  }
+  if (tipo !== "EFECTIVO") {
+    throw crearErrorNegocio(`El medio de pago ${idMedioPago} no es efectivo: no admite monto recibido`, 400);
+  }
+
+  const montoRecibidoCentavos = aCentavos(montoRecibido);
+  if (montoRecibidoCentavos < montoFinalCentavos) {
+    throw crearErrorNegocio(
+      `El monto recibido (${formatearCentavos(montoRecibidoCentavos)}) es menor al monto final (${formatearCentavos(montoFinalCentavos)}) del medio de pago ${idMedioPago}`,
+      400,
+    );
+  }
+
+  return { montoRecibidoCentavos, vueltoCentavos: montoRecibidoCentavos - montoFinalCentavos };
+}
+
+// --- COBRO DE FIADO: RESPUESTA ---
+
+/** Convierte el cobro persistido al formato de la respuesta: fecha ISO y montos con 2 decimales. */
+function convertirCobroPersistido(cobro: CobroFiadoPersistido): LiquidarFiadoResponse["venta"] {
+  return {
+    idVenta: cobro.idVenta,
+    numeroComprobante: cobro.numeroComprobante,
+    estado: "COMPLETADA",
+    montoTotal: formatearCentavos(cobro.montoTotalCentavos),
+    fechaHoraPago: cobro.fechaHoraPago.toISOString(),
+    pagos: cobro.pagos.map(convertirPagoCobrado),
+  };
+}
+
+/** Convierte un pago al formato de la respuesta; recibido y vuelto siguen nulos si no aplican. */
+function convertirPagoCobrado(pago: PagoCobroCalculado): PagoCobrado {
+  return {
+    idMedioPago: pago.idMedioPago,
+    montoFinal: formatearCentavos(pago.montoFinalCentavos),
+    montoRecibido: pago.montoRecibidoCentavos === null ? null : formatearCentavos(pago.montoRecibidoCentavos),
+    vuelto: pago.vueltoCentavos === null ? null : formatearCentavos(pago.vueltoCentavos),
+  };
 }

@@ -3,6 +3,8 @@ import type {
   consultarHistorialSchema,
   consultarVentaSchema,
   ESTADOS_VENTA_HISTORIAL,
+  liquidarFiadoParametrosSchema,
+  liquidarFiadoSchema,
   registrarVentaSchema,
 } from "./ventas.schemas.js";
 
@@ -289,4 +291,95 @@ export type VentaConsultada = {
 export type ConsultarVentaResponse = {
   exito: true;
   venta: VentaConsultada;
+};
+
+// --- COBRO DE FIADO: ENTRADA ---
+
+/** Parámetro de ruta validado de `POST /api/ventas/:idVenta/cobro`, inferido del esquema Zod. */
+export type LiquidarFiadoParametros = z.infer<typeof liquidarFiadoParametrosSchema>;
+
+/** Body validado de `POST /api/ventas/:idVenta/cobro`, inferido del esquema Zod. */
+export type LiquidarFiadoCuerpo = z.infer<typeof liquidarFiadoSchema>;
+
+/** Entrada completa del cobro: la venta que viene de la ruta y los pagos que vienen del body. */
+export type LiquidarFiadoInput = LiquidarFiadoParametros & LiquidarFiadoCuerpo;
+
+// --- COBRO DE FIADO: DATOS DE LA BASE ---
+
+/** Tipo de un medio de pago; solo EFECTIVO admite monto recibido y vuelto. */
+export type TipoMedioPago = "EFECTIVO" | "TRANSFERENCIA" | "TARJETA" | "BILLETERA_VIRTUAL";
+
+/** Medio de pago con su tipo, necesario para decidir si admite monto recibido y vuelto. */
+export type MedioPagoCobrable = MedioPagoVigente & {
+  tipo: TipoMedioPago;
+};
+
+/** Venta leída para cobrarla: solo lo necesario para validar su estado y calcular el importe adeudado. */
+export type VentaAdeudada = {
+  idVenta: number;
+  /** Se conserva tal cual en el cobro. Nulo solo en datos anteriores al backfill. */
+  numeroComprobante: string | null;
+  /** Cualquier estado: el service rechaza el que no sea PENDIENTE_PAGO. */
+  estado: EstadoVentaHistorial;
+  subtotalBrutoCentavos: number;
+  descuentoManualCentavos: number;
+};
+
+// --- COBRO DE FIADO: RESULTADO DEL CÁLCULO ---
+
+/** Un pago del cobro con el ajuste del medio aplicado y, si corresponde, el monto recibido y el vuelto. */
+export type PagoCobroCalculado = PagoVentaCalculado & {
+  /** Lo que entregó el cliente en efectivo. Nulo si el medio no es efectivo o no se informó. */
+  montoRecibidoCentavos: number | null;
+  /** Recibido − monto final. Nulo siempre que el recibido sea nulo. */
+  vueltoCentavos: number | null;
+};
+
+/** Resultado completo de `calcularCobroFiado`, listo para persistir. */
+export type CobroFiadoCalculado = {
+  pagos: PagoCobroCalculado[];
+  /** Subtotal bruto − descuento manual: lo que los pagos (porciones base) deben cubrir. */
+  importeAdeudadoCentavos: number;
+  /** Suma de los montos finales: lo que paga el cliente con recargos o descuentos del día. */
+  montoTotalCentavos: number;
+  /** Se conserva el del ticket de deuda; nunca se emite uno nuevo. */
+  numeroComprobante: string | null;
+};
+
+// --- COBRO DE FIADO: DATOS PERSISTIDOS Y RESPUESTA HTTP ---
+
+/** Datos del cobro ya guardado que necesita el service para armar la respuesta. */
+export type CobroFiadoPersistido = {
+  idVenta: number;
+  numeroComprobante: string | null;
+  montoTotalCentavos: number;
+  fechaHoraPago: Date;
+  pagos: PagoCobroCalculado[];
+};
+
+/** Pago del cobro en la respuesta: montos como texto con 2 decimales. */
+export type PagoCobrado = {
+  idMedioPago: number;
+  montoFinal: string;
+  /** Nulo si el medio no es efectivo o no se informó el monto recibido. */
+  montoRecibido: string | null;
+  /** Nulo siempre que `montoRecibido` sea nulo. */
+  vuelto: string | null;
+};
+
+/** Respuesta exitosa de `POST /api/ventas/:idVenta/cobro`. */
+export type LiquidarFiadoResponse = {
+  exito: true;
+  mensaje: string;
+  venta: {
+    idVenta: number;
+    /** El mismo del ticket de deuda: el comprobante pasa a ser un recibo de pago. */
+    numeroComprobante: string | null;
+    estado: "COMPLETADA";
+    /** Total pagado con los recargos o descuentos del día; cambia respecto del importe del fiado. */
+    montoTotal: string;
+    /** Fecha y hora del cobro en formato ISO 8601. */
+    fechaHoraPago: string;
+    pagos: PagoCobrado[];
+  };
 };
