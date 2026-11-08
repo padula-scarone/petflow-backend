@@ -1,4 +1,5 @@
 import type { Request, Response } from "express";
+import type { SesionAutenticada } from "../auth/auth.types.js";
 import { esErrorNegocio } from "./ventas.errors.js";
 import {
   consultarHistorialSchema,
@@ -39,6 +40,7 @@ function construirRespuestaValidacion(mensaje: string, incidencias: ReadonlyArra
 /**
  * Handler de `POST /api/ventas`.
  * Valida el body y delega en el service. No contiene reglas de negocio.
+ * El vendedor es el usuario del token (`res.locals.sesion`, que deja `requerirRol`); un `idUsuario` en el body se ignora.
  * Respuestas: 201 si se registra; 400 con detalle por campo si el body es inválido;
  * el código del error de negocio (400/404/409) si falla una regla de negocio.
  */
@@ -50,8 +52,11 @@ export async function postRegistrarVenta(req: Request, res: Response): Promise<v
     return;
   }
 
+  // La sesión ya fue verificada por requerirRol: aquí solo se lee para identificar al vendedor
+  const sesion = res.locals.sesion as SesionAutenticada;
+
   try {
-    const resultado = await registrarVenta(parseo.data);
+    const resultado = await registrarVenta({ ...parseo.data, idUsuario: sesion.idUsuario });
     res.status(201).json(resultado);
   } catch (errorCapturado) {
     // Los errores de negocio (objetos puros) se traducen a su código HTTP;

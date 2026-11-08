@@ -7,8 +7,8 @@ import type {
   EstadoVenta,
   FiltroHistorialVentas,
   LiquidarFiadoInput,
-  MedioPagoCobrable,
   MedioPagoVigente,
+  PagoCobroCalculado,
   PaginaHistorialVentas,
   ProductoVigente,
   RegistrarVentaInput,
@@ -27,6 +27,8 @@ export type VentaPersistida = {
   montoTotalCentavos: number;
   estado: EstadoVenta;
   fechaHora: Date;
+  /** Pagos calculados con su recibido y vuelto; vacío en un fiado. */
+  pagos: PagoCobroCalculado[];
 };
 
 /** Función de cálculo que inyecta el service; recibe lo leído de la BD y devuelve los totales. */
@@ -36,7 +38,7 @@ type CalcularVenta = (
 ) => TotalesVentaCalculados;
 
 /** Función de cálculo del cobro que inyecta el service; recibe la venta (o `null`) y los medios leídos. */
-type CalcularCobroFiado = (venta: VentaAdeudada | null, medios: MedioPagoCobrable[]) => CobroFiadoCalculado;
+type CalcularCobroFiado = (venta: VentaAdeudada | null, medios: MedioPagoVigente[]) => CobroFiadoCalculado;
 
 // --- ALTA DE VENTA ---
 
@@ -44,7 +46,7 @@ type CalcularCobroFiado = (venta: VentaAdeudada | null, medios: MedioPagoCobrabl
  * Guarda una venta completa en una única transacción.
  * Es la única capa del módulo que toca Prisma. Si algo falla (usuario, caja, stock, BD)
  * se revierte todo: no queda stock descontado ni ventas a medias.
- * @param input Cuerpo validado de la venta.
+ * @param input Cuerpo validado de la venta más el vendedor tomado del token.
  * @param calcular Cálculo de negocio, ejecutado dentro de la transacción con datos recién leídos.
  * @returns Los datos de la venta persistida.
  * @throws {ErrorNegocio} Usuario inexistente o inactivo (404/400), no hay caja abierta (409) o
@@ -88,6 +90,8 @@ export async function registrarVentaAtomica(
       })),
       medios.map((medio) => ({
         idMedioPago: medio.idMedioPago,
+        // El tipo decide en el service si el pago admite monto recibido (solo efectivo)
+        tipo: medio.tipo,
         activo: medio.estado === "ACTIVO",
         ajusteBp: aBasisPoints(medio.porcentajeRecargo) - aBasisPoints(medio.porcentajeDescuento),
       })),
@@ -135,6 +139,8 @@ export async function registrarVentaAtomica(
         clienteReferencia: input.clienteReferencia ?? null,
         subtotalBruto: centavosAString(calculo.subtotalBrutoCentavos),
         descuentoManual: centavosAString(calculo.descuentoManualCentavos),
+        // El esquema Zod garantiza que existe si y solo si hay descuento
+        motivoDescuento: input.motivoDescuento ?? null,
         montoTotal: centavosAString(calculo.montoTotalCentavos),
         fechaHoraPago: cobrada ? new Date() : null,
         idUsuario: input.idUsuario,
@@ -154,6 +160,9 @@ export async function registrarVentaAtomica(
             montoBase: centavosAString(pago.montoBaseCentavos),
             porcentajeAplicado: basisPointsAString(pago.porcentajeAplicadoBp),
             montoFinal: centavosAString(pago.montoFinalCentavos),
+            // Nulos si el medio no es efectivo o no se informó el recibido
+            montoRecibido: centavosOpcionalAString(pago.montoRecibidoCentavos),
+            vuelto: centavosOpcionalAString(pago.vueltoCentavos),
           })),
         },
       },
@@ -175,6 +184,7 @@ export async function registrarVentaAtomica(
       montoTotalCentavos: calculo.montoTotalCentavos,
       estado: calculo.estado,
       fechaHora: venta.fechaHora,
+      pagos: calculo.pagos,
     };
   });
 }
@@ -265,8 +275,8 @@ export async function liquidarFiadoAtomico(
         porcentajeAplicado: basisPointsAString(pago.porcentajeAplicadoBp),
         montoFinal: centavosAString(pago.montoFinalCentavos),
         // Nulos si el medio no es efectivo o no se informó el recibido
-        montoRecibido: pago.montoRecibidoCentavos === null ? null : centavosAString(pago.montoRecibidoCentavos),
-        vuelto: pago.vueltoCentavos === null ? null : centavosAString(pago.vueltoCentavos),
+        montoRecibido: centavosOpcionalAString(pago.montoRecibidoCentavos),
+        vuelto: centavosOpcionalAString(pago.vueltoCentavos),
       })),
     });
 
@@ -365,8 +375,9 @@ export async function buscarHistorialVentas(
 
 /**
  * Busca una venta por id con sus ítems y pagos. Es solo lectura: no usa `$transaction`.
- * El `select` pide únicamente lo que el contrato devuelve; el costo congelado, `montoRecibido` y `vuelto`
- * nunca salen de la base. Ítems y pagos van ordenados por id para que la respuesta sea determinista.
+ * El `select` pide únicamente lo que el contrato devuelve; el costo congelado nunca sale de la base.
+ * `motivoDescuento`, `montoRecibido` y `vuelto` son nulos en las ventas que no los tienen.
+ * Ítems y pagos van ordenados por id para que la respuesta sea determinista.
  * @param idVenta Id de la venta, ya validado.
  * @returns La venta, o `null` si no existe (el service decide el 404).
  */
@@ -384,6 +395,7 @@ export async function buscarVentaPorId(idVenta: number): Promise<VentaDetallada 
       clienteReferencia: true,
       subtotalBruto: true,
       descuentoManual: true,
+      motivoDescuento: true,
       montoTotal: true,
       usuario: { select: { idUsuario: true, nombre: true } },
       detalles: {
@@ -401,6 +413,8 @@ export async function buscarVentaPorId(idVenta: number): Promise<VentaDetallada 
           montoBase: true,
           porcentajeAplicado: true,
           montoFinal: true,
+          montoRecibido: true,
+          vuelto: true,
           medioPago: { select: { idMedioPago: true, nombre: true } },
         },
       },
@@ -424,6 +438,7 @@ export async function buscarVentaPorId(idVenta: number): Promise<VentaDetallada 
     vendedor: { idUsuario: venta.usuario.idUsuario, nombre: venta.usuario.nombre },
     subtotalBrutoCentavos: aCentavos(venta.subtotalBruto),
     descuentoManualCentavos: aCentavos(venta.descuentoManual),
+    motivoDescuento: venta.motivoDescuento,
     montoTotalCentavos: aCentavos(venta.montoTotal),
     items: venta.detalles.map((detalle) => ({
       idProducto: detalle.producto.idProducto,
@@ -439,6 +454,9 @@ export async function buscarVentaPorId(idVenta: number): Promise<VentaDetallada 
       montoBaseCentavos: aCentavos(pago.montoBase),
       porcentajeAplicadoBp: aBasisPoints(pago.porcentajeAplicado),
       montoFinalCentavos: aCentavos(pago.montoFinal),
+      // Nulos en ventas anteriores, en medios que no son efectivo o si no se informó el recibido
+      montoRecibidoCentavos: pago.montoRecibido === null ? null : aCentavos(pago.montoRecibido),
+      vueltoCentavos: pago.vuelto === null ? null : aCentavos(pago.vuelto),
     })),
   };
 }
@@ -474,6 +492,11 @@ function aBasisPoints(valor: { toNumber(): number }): number {
 /** Centavos enteros a texto con 2 decimales. */
 function centavosAString(centavos: number): string {
   return (centavos / 100).toFixed(2);
+}
+
+/** Igual que `centavosAString`, pero conserva `null` para las columnas decimales que admiten nulo. */
+function centavosOpcionalAString(centavos: number | null): string | null {
+  return centavos === null ? null : centavosAString(centavos);
 }
 
 /** Milésimas enteras a texto con 3 decimales. */

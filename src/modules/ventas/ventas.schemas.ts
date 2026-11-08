@@ -59,25 +59,53 @@ const pagoVentaSchema = z.object({
     .refine(decimalesMonto, "El monto admite hasta 2 decimales"),
 });
 
+// --- ESQUEMAS DE PAGO CON MONTO RECIBIDO ---
+// Van antes de `registrarVentaSchema` porque se evalúan al cargar el módulo: usarlos más arriba que su declaración fallaría.
+
+/** Tope de `montoRecibido`: máximo de una columna decimal(12,2); más allá, la BD falla con 500. */
+export const MONTO_RECIBIDO_MAXIMO = 9_999_999_999.99;
+
+/** Largo máximo de `motivoDescuento`: coincide con la columna VARCHAR(200). */
+export const MOTIVO_DESCUENTO_LONGITUD_MAXIMA = 200;
+
+/**
+ * Un pago con el monto recibido opcional. Lo comparten el alta de venta y el cobro de un fiado.
+ * `montoRecibido` solo corresponde a un medio en efectivo, pero eso lo valida el service (el esquema no conoce el tipo del medio).
+ */
+const pagoConMontoRecibidoSchema = pagoVentaSchema.extend({
+  montoRecibido: z
+    .number()
+    .positive()
+    .max(MONTO_RECIBIDO_MAXIMO)
+    .refine(decimalesMonto, "El monto recibido admite hasta 2 decimales")
+    .optional(),
+});
+
 // --- ESQUEMA PRINCIPAL ---
 
 /**
  * Contrato de entrada de `POST /api/ventas`.
  * Si `pagos` viene vacío la venta es un fiado y `clienteReferencia` pasa a ser obligatorio.
+ * El vendedor no viaja en el body: sale del token. Si llega `idUsuario`, Zod lo descarta sin error (el objeto no es estricto).
  */
 export const registrarVentaSchema = z
   .object({
     origen: z.enum(["MOSTRADOR", "DIGITAL"]),
     modalidadEntrega: z.enum(["RETIRO", "ENVIO"]),
-    // TEMPORAL: hasta que exista Login (6.1) el vendedor llega en el body
-    idUsuario: z.number().int().positive().max(ID_ENTERO_MAXIMO),
     clienteReferencia: z.string().trim().min(1).max(100).optional(),
     items: z.array(itemVentaSchema).min(1),
-    pagos: z.array(pagoVentaSchema),
+    pagos: z.array(pagoConMontoRecibidoSchema),
     descuentoManual: z
       .number()
       .nonnegative()
       .refine(decimalesMonto, "El descuento admite hasta 2 decimales")
+      .optional(),
+    // Una cadena vacía (o solo espacios) se rechaza: el front omite el campo cuando no hay descuento
+    motivoDescuento: z
+      .string()
+      .trim()
+      .min(1, "El motivo del descuento no puede estar vacío")
+      .max(MOTIVO_DESCUENTO_LONGITUD_MAXIMA, `El motivo del descuento admite hasta ${MOTIVO_DESCUENTO_LONGITUD_MAXIMA} caracteres`)
       .optional(),
   })
   // Reglas que cruzan varios campos y no se pueden expresar en cada campo por separado
@@ -104,27 +132,27 @@ export const registrarVentaSchema = z
     });
 
     validarMediosNoRepetidos(data.pagos, ctx);
+
+    // El motivo y el descuento van de la mano: con descuento el motivo es obligatorio y sin descuento no tiene sentido.
+    // Si el motivo vino vacío ya lo rechazó su propio campo; aquí solo se cubre el caso de ausencia o contradicción.
+    const hayDescuento = (data.descuentoManual ?? 0) > 0;
+    if (hayDescuento && data.motivoDescuento === undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["motivoDescuento"],
+        message: "Un descuento manual requiere indicar el motivo",
+      });
+    }
+    if (!hayDescuento && data.motivoDescuento !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["motivoDescuento"],
+        message: "No se puede indicar un motivo sin descuento manual",
+      });
+    }
   });
 
-// --- COBRO DE FIADO: CONSTANTES ---
-
-/** Tope de `montoRecibido`: máximo de una columna decimal(12,2); más allá, la BD falla con 500. */
-export const MONTO_RECIBIDO_MAXIMO = 9_999_999_999.99;
-
 // --- COBRO DE FIADO: ESQUEMAS ---
-
-/**
- * Un pago del cobro: como el del alta, más el monto recibido opcional.
- * `montoRecibido` solo corresponde a un medio en efectivo, pero eso lo valida el service (el esquema no conoce el tipo del medio).
- */
-const pagoCobroFiadoSchema = pagoVentaSchema.extend({
-  montoRecibido: z
-    .number()
-    .positive()
-    .max(MONTO_RECIBIDO_MAXIMO)
-    .refine(decimalesMonto, "El monto recibido admite hasta 2 decimales")
-    .optional(),
-});
 
 /**
  * Contrato de entrada del body de `POST /api/ventas/:idVenta/cobro`.
@@ -132,7 +160,7 @@ const pagoCobroFiadoSchema = pagoVentaSchema.extend({
  */
 export const liquidarFiadoSchema = z
   .object({
-    pagos: z.array(pagoCobroFiadoSchema).min(1),
+    pagos: z.array(pagoConMontoRecibidoSchema).min(1),
   })
   .superRefine((data, ctx) => {
     validarMediosNoRepetidos(data.pagos, ctx);

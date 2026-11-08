@@ -10,14 +10,20 @@ import type {
 
 // --- TIPOS DE ENTRADA ---
 
-/** Cuerpo validado de `POST /api/ventas`, inferido del esquema Zod. */
-export type RegistrarVentaInput = z.infer<typeof registrarVentaSchema>;
+/** Cuerpo validado de `POST /api/ventas`, inferido del esquema Zod. No incluye al vendedor: sale del token. */
+export type RegistrarVentaCuerpo = z.infer<typeof registrarVentaSchema>;
+
+/** Entrada completa del alta: el cuerpo del request más el vendedor, que viene del token ya verificado. */
+export type RegistrarVentaInput = RegistrarVentaCuerpo & {
+  /** Usuario de la sesión; nunca se toma del body. */
+  idUsuario: number;
+};
 
 /** Canal por el que se originó la venta. */
-export type OrigenVenta = RegistrarVentaInput["origen"];
+export type OrigenVenta = RegistrarVentaCuerpo["origen"];
 
 /** Forma de entrega de la mercadería. */
-export type ModalidadEntrega = RegistrarVentaInput["modalidadEntrega"];
+export type ModalidadEntrega = RegistrarVentaCuerpo["modalidadEntrega"];
 
 /** Estados con los que puede nacer una venta: cobrada o fiado. */
 export type EstadoVenta = "COMPLETADA" | "PENDIENTE_PAGO";
@@ -41,9 +47,13 @@ export type ProductoVigente = {
   stockMilesimas: number;
 };
 
-/** Medio de pago con su ajuste porcentual ya resuelto. */
+/** Tipo de un medio de pago; solo EFECTIVO admite monto recibido y vuelto. */
+export type TipoMedioPago = "EFECTIVO" | "TRANSFERENCIA" | "TARJETA" | "BILLETERA_VIRTUAL";
+
+/** Medio de pago con su ajuste porcentual ya resuelto y su tipo (decide si admite monto recibido y vuelto). */
 export type MedioPagoVigente = {
   idMedioPago: number;
+  tipo: TipoMedioPago;
   activo: boolean;
   /** Neto del medio: recargo − descuento, en basis points (ej. 1000 = 10%). */
   ajusteBp: number;
@@ -75,8 +85,8 @@ export type PagoVentaCalculado = {
 /** Resultado completo de `calcularVenta`, listo para persistir. */
 export type TotalesVentaCalculados = {
   lineas: LineaVentaCalculada[];
-  /** Vacío en un fiado. */
-  pagos: PagoVentaCalculado[];
+  /** Vacío en un fiado. Cada pago trae monto recibido y vuelto (nulos si no aplican). */
+  pagos: PagoCobroCalculado[];
   subtotalBrutoCentavos: number;
   descuentoManualCentavos: number;
   /** Fiado: subtotal − descuento. Cobrada: suma de los montos finales de los pagos. */
@@ -98,6 +108,8 @@ export type RegistrarVentaResponse = {
     estado: EstadoVenta;
     /** Fecha y hora en formato ISO 8601. */
     fechaHora: string;
+    /** Vacío en un fiado. Permite al front mostrar el vuelto sin otra consulta. */
+    pagos: PagoCobrado[];
   };
 };
 
@@ -186,8 +198,7 @@ export type ConsultarHistorialResponse = {
 export type ConsultarVentaInput = z.infer<typeof consultarVentaSchema>;
 
 // --- CONSULTA DE UNA VENTA: DATOS DE LA BASE ---
-// Solo incluye lo que el contrato permite devolver: el costo congelado, montoRecibido y vuelto
-// no se piden a la base.
+// Solo incluye lo que el contrato permite devolver: el costo congelado no se pide a la base.
 
 /** Una línea de la venta tal como se guardó (precio congelado al registrar). */
 export type ItemVentaDetallado = {
@@ -209,6 +220,10 @@ export type PagoVentaDetallado = {
   /** Ajuste neto (recargo − descuento) aplicado, en basis points. */
   porcentajeAplicadoBp: number;
   montoFinalCentavos: number;
+  /** Lo que entregó el cliente en efectivo. Nulo en ventas anteriores o si no se informó. */
+  montoRecibidoCentavos: number | null;
+  /** Recibido − monto final. Nulo siempre que el recibido sea nulo. */
+  vueltoCentavos: number | null;
 };
 
 /** Vendedor que registró la venta. */
@@ -232,6 +247,8 @@ export type VentaDetallada = {
   vendedor: VendedorVenta;
   subtotalBrutoCentavos: number;
   descuentoManualCentavos: number;
+  /** Nulo si la venta no tuvo descuento o es anterior a que se registrara el motivo. */
+  motivoDescuento: string | null;
   montoTotalCentavos: number;
   items: ItemVentaDetallado[];
   /** Vacío en un fiado no cobrado. */
@@ -261,7 +278,7 @@ export type PagoVentaConsultado = {
   /** Ajuste neto como texto con 2 decimales; negativo si el medio da descuento (ej. "-5.00"). */
   porcentajeAplicado: string;
   montoFinal: string;
-};
+} & Pick<PagoCobrado, "montoRecibido" | "vuelto">;
 
 /** Venta en la respuesta. El tipo de comprobante se deduce de `estado`; no hay un campo aparte. */
 export type VentaConsultada = {
@@ -281,6 +298,8 @@ export type VentaConsultada = {
   /** Montos como texto con 2 decimales. */
   subtotalBruto: string;
   descuentoManual: string;
+  /** Nulo si la venta no tuvo descuento o es anterior a que se registrara el motivo. */
+  motivoDescuento: string | null;
   montoTotal: string;
   items: ItemVentaConsultado[];
   /** Arreglo vacío si es un ticket de deuda (PENDIENTE_PAGO). */
@@ -306,14 +325,6 @@ export type LiquidarFiadoInput = LiquidarFiadoParametros & LiquidarFiadoCuerpo;
 
 // --- COBRO DE FIADO: DATOS DE LA BASE ---
 
-/** Tipo de un medio de pago; solo EFECTIVO admite monto recibido y vuelto. */
-export type TipoMedioPago = "EFECTIVO" | "TRANSFERENCIA" | "TARJETA" | "BILLETERA_VIRTUAL";
-
-/** Medio de pago con su tipo, necesario para decidir si admite monto recibido y vuelto. */
-export type MedioPagoCobrable = MedioPagoVigente & {
-  tipo: TipoMedioPago;
-};
-
 /** Venta leída para cobrarla: solo lo necesario para validar su estado y calcular el importe adeudado. */
 export type VentaAdeudada = {
   idVenta: number;
@@ -327,7 +338,10 @@ export type VentaAdeudada = {
 
 // --- COBRO DE FIADO: RESULTADO DEL CÁLCULO ---
 
-/** Un pago del cobro con el ajuste del medio aplicado y, si corresponde, el monto recibido y el vuelto. */
+/**
+ * Un pago con el ajuste del medio aplicado y, si corresponde, el monto recibido y el vuelto.
+ * Lo comparten el alta de venta y el cobro de un fiado.
+ */
 export type PagoCobroCalculado = PagoVentaCalculado & {
   /** Lo que entregó el cliente en efectivo. Nulo si el medio no es efectivo o no se informó. */
   montoRecibidoCentavos: number | null;
@@ -357,7 +371,7 @@ export type CobroFiadoPersistido = {
   pagos: PagoCobroCalculado[];
 };
 
-/** Pago del cobro en la respuesta: montos como texto con 2 decimales. */
+/** Pago en la respuesta del alta y del cobro: montos como texto con 2 decimales. */
 export type PagoCobrado = {
   idMedioPago: number;
   montoFinal: string;
