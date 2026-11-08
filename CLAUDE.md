@@ -43,3 +43,10 @@ Para consultar el modelo de datos relacional, los Casos de Uso Base (CUB) y las 
 - `prisma.config.ts` usa `DIRECT_URL` (CLI); `src/shared/prisma.ts` usa `DATABASE_URL` (pooler) en runtime.
 - El cliente se genera en `src/generated/prisma/` (ignorado por git).
 - Módulo `ventas` implementado: `POST /api/ventas` (alta de venta cobrada o fiado), `GET /api/ventas` (historial paginado con filtros por fecha, producto y estado), `GET /api/ventas/:idVenta` (detalle de una venta con ítems y pagos, en cualquier estado) y `POST /api/ventas/:idVenta/cobro` (liquidar un fiado: cobro total con vuelto en efectivo y control de doble cobro). Detalle de reglas: `../petflow-workspace/SSOT.md`.
+
+# Criterio sobre el SSOT
+- La fuente de verdad es `../petflow-workspace/SSOT.md`, pero no es una biblia: puede faltar algo o estar desactualizado. Se respeta salvo que Nahuel indique lo contrario.
+- Ante un hueco o una contradicción, no lo resuelvas en silencio: avisalo. Si es imprescindible para el front o el back y Nahuel lo autoriza, se actualiza primero el SSOT y después se desarrolla. Lo que no sea imprescindible no se desarrolla.
+- Las acciones del Cuadro no se renombran; las sub-acciones se pueden agregar o cambiar. Back y Front tienen estado propio en el Cuadro.
+- El SSOT solo se edita desde una sesión de CC abierta en `petflow-workspace`; desde este repo se prepara el texto propuesto y se informa.
+- Nada se agrega a los registros de cambios del SSOT sin autorización de Nahuel.

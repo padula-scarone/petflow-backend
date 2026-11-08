@@ -2,6 +2,8 @@ import cors from "cors";
 import express from "express";
 import swaggerUi from "swagger-ui-express";
 import { authRouter } from "./modules/auth/auth.routes.js";
+import { cajaRouter } from "./modules/caja/caja.routes.js";
+import { inventarioRouter } from "./modules/inventario/inventario.routes.js";
 import { ventasRouter } from "./modules/ventas/ventas.routes.js";
 import { openapiDocument } from "./shared/openapi.js";
 
@@ -24,6 +26,8 @@ app.use("/docs", swaggerUi.serve, swaggerUi.setup(openapiDocument));
 
 app.use("/api/auth", authRouter);
 app.use("/api/ventas", ventasRouter);
+app.use("/api/productos", inventarioRouter);
+app.use("/api/medios-pago", cajaRouter);
 
 const puerto = Number(process.env.PORT ?? 3000);
 
