@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { iniciarSesionSchema } from "../modules/auth/auth.schemas.js";
+import { consultarProductosSchema, BUSQUEDA_LONGITUD_MAXIMA } from "../modules/inventario/inventario.schemas.js";
 import {
   CANTIDAD_POR_PAGINA_MAXIMA,
   CANTIDAD_POR_PAGINA_PREDETERMINADA,
@@ -441,6 +442,84 @@ const parametrosHistorial = Object.entries(esquemaConsultaHistorial.properties ?
   schema: esquema,
 }));
 
+// --- CATÁLOGO DE PRODUCTOS Y MEDIOS DE PAGO ---
+
+// El parámetro se deriva del esquema Zod real, igual que los del historial, para que no se desactualice
+const esquemaConsultaProductos = z.toJSONSchema(consultarProductosSchema, { io: "input", target: "draft-7" });
+const parametroBusqueda = {
+  name: "busqueda",
+  in: "query",
+  required: false,
+  description:
+    `Texto a buscar dentro del nombre, sin distinguir mayúsculas ni normalizar acentos; máximo ${BUSQUEDA_LONGITUD_MAXIMA} caracteres. ` +
+    "Los caracteres `%` y `_` actúan como comodines. Vacío o ausente devuelve todos los productos activos.",
+  schema: (esquemaConsultaProductos.properties ?? {}).busqueda,
+};
+
+/** Error de validación (400) de la búsqueda de productos: mismo formato, con el mensaje propio de la query. */
+const errorValidacionBusquedaProductos = {
+  ...errorValidacionConsulta,
+  properties: {
+    ...errorValidacionConsulta.properties,
+    errores: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          campo: { type: "string", example: "busqueda" },
+          mensaje: { type: "string" },
+        },
+      },
+    },
+  },
+};
+
+/** Respuesta exitosa de `GET /api/productos` (ver `ConsultarProductosResponse`). */
+const productosConsultados = {
+  type: "object",
+  properties: {
+    exito: { type: "boolean", example: true },
+    productos: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          idProducto: { type: "integer", example: 1 },
+          nombre: { type: "string", example: "Alimento balanceado perro adulto 15 kg" },
+          precioVenta: { type: "string", example: "45000.00", description: "Texto con 2 decimales" },
+          stockFisico: { type: "string", example: "12.000", description: "Texto con 3 decimales" },
+          formatoVenta: { type: "string", enum: ["UNIDAD", "GRANEL"], example: "UNIDAD" },
+        },
+        required: ["idProducto", "nombre", "precioVenta", "stockFisico", "formatoVenta"],
+      },
+    },
+  },
+  required: ["exito", "productos"],
+};
+
+/** Respuesta exitosa de `GET /api/medios-pago` (ver `ListarMediosPagoResponse`). */
+const mediosPagoListados = {
+  type: "object",
+  properties: {
+    exito: { type: "boolean", example: true },
+    mediosPago: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          idMedioPago: { type: "integer", example: 1 },
+          nombre: { type: "string", example: "Efectivo" },
+          tipo: { type: "string", enum: ["EFECTIVO", "TRANSFERENCIA", "TARJETA", "BILLETERA_VIRTUAL"], example: "EFECTIVO" },
+          porcentajeRecargo: { type: "string", example: "0.00", description: "Texto con 2 decimales" },
+          porcentajeDescuento: { type: "string", example: "5.00", description: "Texto con 2 decimales" },
+        },
+        required: ["idMedioPago", "nombre", "tipo", "porcentajeRecargo", "porcentajeDescuento"],
+      },
+    },
+  },
+  required: ["exito", "mediosPago"],
+};
+
 // --- DOCUMENTO OPENAPI ---
 
 /**
@@ -459,6 +538,8 @@ export const openapiDocument = {
   tags: [
     { name: "Seguridad", description: "Inicio de sesión y control de acceso" },
     { name: "Ventas", description: "Alta y gestión de ventas" },
+    { name: "Inventario", description: "Catálogo de productos" },
+    { name: "Caja", description: "Medios de pago" },
   ],
   components: {
     securitySchemes: {
@@ -501,6 +582,47 @@ export const openapiDocument = {
             description: "Credenciales inválidas",
             content: { "application/json": { schema: crearEsquemaErrorAutenticacion("Credenciales inválidas") } },
           },
+        },
+      },
+    },
+    "/api/productos": {
+      get: {
+        tags: ["Inventario"],
+        security: [{ bearerAuth: [] }],
+        summary: "Buscar productos activos para el carrito",
+        description:
+          "Devuelve solo productos con estado ACTIVO, sin filtrar por stock (el alta de venta valida el stock). " +
+          "Sin paginación. Orden: nombre ascendente y id ascendente como desempate. Sin coincidencias devuelve 200 con lista vacía. " +
+          "No expone costo, categoría ni código de barras. Requiere sesión (roles VENDEDOR, GESTOR_COMERCIAL o GERENTE); no exige caja abierta.",
+        parameters: [parametroBusqueda],
+        responses: {
+          "200": {
+            description: "Productos activos que coinciden con la búsqueda",
+            content: { "application/json": { schema: productosConsultados } },
+          },
+          "400": {
+            description: "`busqueda` de más de 100 caracteres o repetida",
+            content: { "application/json": { schema: errorValidacionBusquedaProductos } },
+          },
+          ...respuestasProteccion,
+        },
+      },
+    },
+    "/api/medios-pago": {
+      get: {
+        tags: ["Caja"],
+        security: [{ bearerAuth: [] }],
+        summary: "Listar los medios de pago activos",
+        description:
+          "Devuelve solo medios con estado ACTIVO, ordenados por id ascendente, con su recargo y descuento porcentuales. " +
+          "\"Fiado\" no es un medio de pago: es una venta sin pagos. Sin parámetros. " +
+          "Requiere sesión (roles VENDEDOR, GESTOR_COMERCIAL o GERENTE); no exige caja abierta.",
+        responses: {
+          "200": {
+            description: "Medios de pago activos",
+            content: { "application/json": { schema: mediosPagoListados } },
+          },
+          ...respuestasProteccion,
         },
       },
     },
