@@ -14,7 +14,6 @@ import type {
   ItemVentaDetallado,
   LiquidarFiadoInput,
   LiquidarFiadoResponse,
-  MedioPagoCobrable,
   MedioPagoVigente,
   PagoCobrado,
   PagoCobroCalculado,
@@ -24,6 +23,7 @@ import type {
   ProductoVigente,
   RegistrarVentaInput,
   RegistrarVentaResponse,
+  TipoMedioPago,
   TotalesVentaCalculados,
   VentaAdeudada,
   VentaDetallada,
@@ -63,6 +63,8 @@ export async function registrarVenta(input: RegistrarVentaInput): Promise<Regist
       montoTotal: formatearCentavos(venta.montoTotalCentavos),
       estado: venta.estado,
       fechaHora: venta.fechaHora.toISOString(),
+      // Con el recibido y el vuelto ya calculados, el front los muestra sin consultar de nuevo la venta
+      pagos: venta.pagos.map(convertirPagoCobrado),
     },
   };
 }
@@ -74,10 +76,11 @@ export async function registrarVenta(input: RegistrarVentaInput): Promise<Regist
  * Es pura a propósito: así se prueba con datos de ejemplo sin conectarse a Supabase.
  * @param input Cuerpo validado de la venta.
  * @param productos Productos leídos de la BD con sus valores vigentes.
- * @param medios Medios de pago leídos de la BD.
- * @returns Líneas, pagos, totales y estado final de la venta.
+ * @param medios Medios de pago leídos de la BD, con su tipo.
+ * @returns Líneas, pagos (con recibido y vuelto si corresponde), totales y estado final de la venta.
  * @throws {ErrorNegocio} Producto o medio inexistente/inactivo, cantidad inválida, descuento excesivo,
- * pagos que no cuadran o stock insuficiente en algún producto. Se lanza como objeto puro, no como Error.
+ * pagos que no cuadran, stock insuficiente en algún producto, monto recibido en un medio que no es efectivo
+ * o menor al monto final. Se lanza como objeto puro, no como Error.
  */
 export function calcularVenta(
   input: RegistrarVentaInput,
@@ -138,7 +141,12 @@ export function calcularVenta(
     };
   }
 
-  const pagos = calcularPagosVenta(input.pagos, medios, aCobrarCentavos);
+  // El vuelto es solo registro: el total y la caja siguen saliendo de los montos finales
+  const pagos = adjuntarMontoRecibidoYVuelto(
+    input.pagos,
+    calcularPagosVenta(input.pagos, medios, aCobrarCentavos),
+    medios,
+  );
 
   return {
     lineas,
@@ -206,6 +214,42 @@ export function calcularPagosVenta(
   return pagos;
 }
 
+/**
+ * Completa cada pago calculado con su monto recibido y su vuelto.
+ * Es compartida por el alta de venta y por el cobro de un fiado: ambos tratan el efectivo igual.
+ * @param pagosSolicitados Pagos del cuerpo, con el monto recibido opcional.
+ * @param pagosCalculados Resultado de `calcularPagosVenta` para esos mismos pagos.
+ * @param medios Medios de pago leídos de la BD, con su tipo.
+ * @returns Un pago por cada solicitado, en el mismo orden.
+ * @throws {ErrorNegocio} 400 si el recibido va en un medio que no es efectivo o no alcanza el monto final.
+ */
+function adjuntarMontoRecibidoYVuelto(
+  pagosSolicitados: ReadonlyArray<{ idMedioPago: number; montoRecibido?: number | undefined }>,
+  pagosCalculados: PagoVentaCalculado[],
+  medios: MedioPagoVigente[],
+): PagoCobroCalculado[] {
+  // Los medios no se repiten (lo garantiza el esquema), así que el medio identifica de forma única cada pago
+  const pagosCalculadosPorMedio = new Map(pagosCalculados.map((pago) => [pago.idMedioPago, pago]));
+  const tiposPorMedio = new Map(medios.map((medio) => [medio.idMedioPago, medio.tipo]));
+
+  return pagosSolicitados.map((pagoSolicitado): PagoCobroCalculado => {
+    const pagoCalculado = pagosCalculadosPorMedio.get(pagoSolicitado.idMedioPago);
+    if (pagoCalculado === undefined) {
+      // Inalcanzable: calcularPagosVenta devuelve un pago por cada solicitado; es una defensa
+      throw crearErrorNegocio(`El medio de pago ${pagoSolicitado.idMedioPago} no se pudo calcular`, 400);
+    }
+    return {
+      ...pagoCalculado,
+      ...calcularMontoRecibidoYVuelto(
+        pagoSolicitado.idMedioPago,
+        tiposPorMedio.get(pagoSolicitado.idMedioPago),
+        pagoSolicitado.montoRecibido,
+        pagoCalculado.montoFinalCentavos,
+      ),
+    };
+  });
+}
+
 // --- UTILIDADES DE MONEDA Y CANTIDAD ---
 
 /**
@@ -214,6 +258,11 @@ export function calcularPagosVenta(
  */
 export function formatearCentavos(centavos: number): string {
   return (centavos / 100).toFixed(2);
+}
+
+/** Igual que `formatearCentavos`, pero conserva `null` (ventas anteriores o montos que no aplican). */
+function formatearCentavosOpcional(centavos: number | null): string | null {
+  return centavos === null ? null : formatearCentavos(centavos);
 }
 
 /** Convierte un monto decimal a centavos enteros, redondeando para absorber el error de coma flotante. */
@@ -351,6 +400,7 @@ function convertirVentaDetallada(venta: VentaDetallada): ConsultarVentaResponse[
     vendedor: venta.vendedor,
     subtotalBruto: formatearCentavos(venta.subtotalBrutoCentavos),
     descuentoManual: formatearCentavos(venta.descuentoManualCentavos),
+    motivoDescuento: venta.motivoDescuento,
     montoTotal: formatearCentavos(venta.montoTotalCentavos),
     items: venta.items.map(convertirItemVenta),
     pagos: venta.pagos.map(convertirPagoVenta),
@@ -369,7 +419,7 @@ function convertirItemVenta(item: ItemVentaDetallado): ItemVentaConsultado {
   };
 }
 
-/** Convierte un pago al formato de la respuesta: montos y porcentaje con 2 decimales. */
+/** Convierte un pago al formato de la respuesta: montos y porcentaje con 2 decimales; recibido y vuelto pueden ser nulos. */
 function convertirPagoVenta(pago: PagoVentaDetallado): PagoVentaConsultado {
   return {
     idMedioPago: pago.idMedioPago,
@@ -377,6 +427,8 @@ function convertirPagoVenta(pago: PagoVentaDetallado): PagoVentaConsultado {
     montoBase: formatearCentavos(pago.montoBaseCentavos),
     porcentajeAplicado: formatearBasisPoints(pago.porcentajeAplicadoBp),
     montoFinal: formatearCentavos(pago.montoFinalCentavos),
+    montoRecibido: formatearCentavosOpcional(pago.montoRecibidoCentavos),
+    vuelto: formatearCentavosOpcional(pago.vueltoCentavos),
   };
 }
 
@@ -433,7 +485,7 @@ export async function liquidarFiado(input: LiquidarFiadoInput): Promise<Liquidar
 export function calcularCobroFiado(
   input: LiquidarFiadoInput,
   venta: VentaAdeudada | null,
-  medios: MedioPagoCobrable[],
+  medios: MedioPagoVigente[],
 ): CobroFiadoCalculado {
   if (venta === null) {
     throw crearErrorNegocio(`La venta ${input.idVenta} no existe`, 404);
@@ -445,28 +497,11 @@ export function calcularCobroFiado(
   // Se cobra lo que se debe (subtotal − descuento) y no el montoTotal guardado:
   // el cobro es total y el descuento manual solo se carga en el alta
   const importeAdeudadoCentavos = venta.subtotalBrutoCentavos - venta.descuentoManualCentavos;
-  const pagosCalculados = calcularPagosVenta(input.pagos, medios, importeAdeudadoCentavos);
-
-  // Los medios no se repiten (lo garantiza el esquema), así que el medio identifica de forma única cada pago
-  const pagosCalculadosPorMedio = new Map(pagosCalculados.map((pago) => [pago.idMedioPago, pago]));
-  const tiposPorMedio = new Map(medios.map((medio) => [medio.idMedioPago, medio.tipo]));
-
-  const pagos = input.pagos.map((pagoSolicitado): PagoCobroCalculado => {
-    const pagoCalculado = pagosCalculadosPorMedio.get(pagoSolicitado.idMedioPago);
-    if (pagoCalculado === undefined) {
-      // Inalcanzable: calcularPagosVenta devuelve un pago por cada solicitado; es una defensa
-      throw crearErrorNegocio(`El medio de pago ${pagoSolicitado.idMedioPago} no se pudo calcular`, 400);
-    }
-    return {
-      ...pagoCalculado,
-      ...calcularMontoRecibidoYVuelto(
-        pagoSolicitado.idMedioPago,
-        tiposPorMedio.get(pagoSolicitado.idMedioPago),
-        pagoSolicitado.montoRecibido,
-        pagoCalculado.montoFinalCentavos,
-      ),
-    };
-  });
+  const pagos = adjuntarMontoRecibidoYVuelto(
+    input.pagos,
+    calcularPagosVenta(input.pagos, medios, importeAdeudadoCentavos),
+    medios,
+  );
 
   return {
     pagos,
@@ -488,7 +523,7 @@ export function calcularCobroFiado(
  */
 function calcularMontoRecibidoYVuelto(
   idMedioPago: number,
-  tipo: MedioPagoCobrable["tipo"] | undefined,
+  tipo: TipoMedioPago | undefined,
   montoRecibido: number | undefined,
   montoFinalCentavos: number,
 ): Pick<PagoCobroCalculado, "montoRecibidoCentavos" | "vueltoCentavos"> {
@@ -524,12 +559,12 @@ function convertirCobroPersistido(cobro: CobroFiadoPersistido): LiquidarFiadoRes
   };
 }
 
-/** Convierte un pago al formato de la respuesta; recibido y vuelto siguen nulos si no aplican. */
+/** Convierte un pago al formato de la respuesta del alta y del cobro; recibido y vuelto siguen nulos si no aplican. */
 function convertirPagoCobrado(pago: PagoCobroCalculado): PagoCobrado {
   return {
     idMedioPago: pago.idMedioPago,
     montoFinal: formatearCentavos(pago.montoFinalCentavos),
-    montoRecibido: pago.montoRecibidoCentavos === null ? null : formatearCentavos(pago.montoRecibidoCentavos),
-    vuelto: pago.vueltoCentavos === null ? null : formatearCentavos(pago.vueltoCentavos),
+    montoRecibido: formatearCentavosOpcional(pago.montoRecibidoCentavos),
+    vuelto: formatearCentavosOpcional(pago.vueltoCentavos),
   };
 }

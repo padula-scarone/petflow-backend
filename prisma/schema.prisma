@@ -190,7 +190,9 @@ model Venta {
   clienteReferencia String?          @map("cliente_referencia") @db.VarChar(100)
   subtotalBruto     Decimal          @map("subtotal_bruto") @db.Decimal(12, 2)
   descuentoManual   Decimal          @default(0.00) @map("descuento_manual") @db.Decimal(10, 2)
-  montoTotal        Decimal          @map("monto_total") @db.Decimal(12, 2)
+  // Obligatorio (a nivel de aplicacion) cuando hay descuento manual; nulo en ventas sin descuento o anteriores
+  motivoDescuento   String?          @map("motivo_descuento") @db.VarChar(200)
+  montoTotal       Decimal          @map("monto_total") @db.Decimal(12, 2)
   estado            EstadoVenta      @default(COMPLETADA)
   idUsuario         Int              @map("id_usuario")
   // Nulo mientras el fiado no se cobra

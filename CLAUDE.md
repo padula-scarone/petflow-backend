@@ -42,7 +42,8 @@ Para consultar el modelo de datos relacional, los Casos de Uso Base (CUB) y las 
 - **Prisma 7.10.1** con `@prisma/adapter-pg` (`prisma`, `@prisma/client`). No migrar a Prisma 8: decisión del arquitecto, la versión rc quedó descartada por inestable.
 - `prisma.config.ts` usa `DIRECT_URL` (CLI); `src/shared/prisma.ts` usa `DATABASE_URL` (pooler) en runtime.
 - El cliente se genera en `src/generated/prisma/` (ignorado por git).
-- Módulo `ventas` implementado: `POST /api/ventas` (alta de venta cobrada o fiado), `GET /api/ventas` (historial paginado con filtros por fecha, producto y estado), `GET /api/ventas/:idVenta` (detalle de una venta con ítems y pagos, en cualquier estado) y `POST /api/ventas/:idVenta/cobro` (liquidar un fiado: cobro total con vuelto en efectivo y control de doble cobro). Detalle de reglas: `../petflow-workspace/SSOT.md`.
+- Módulo `ventas` implementado: `POST /api/ventas` (alta de venta cobrada o fiado; el vendedor sale del token, el descuento manual exige `motivoDescuento` y los pagos en efectivo admiten `montoRecibido` con vuelto calculado por el servidor; responde con `pagos[]`), `GET /api/ventas` (historial paginado con filtros por fecha, producto y estado), `GET /api/ventas/:idVenta` (detalle de una venta con ítems y pagos, en cualquier estado, incluidos `motivoDescuento`, `montoRecibido` y `vuelto`, nulos si no aplican) y `POST /api/ventas/:idVenta/cobro` (liquidar un fiado: cobro total con vuelto en efectivo y control de doble cobro). Detalle de reglas: `../petflow-workspace/SSOT.md`.
+- `ventas.motivo_descuento VARCHAR(200) NULL` se aplica a mano en Supabase; Prisma solo lo mapea.
 
 # Criterio sobre el SSOT
 - La fuente de verdad es `../petflow-workspace/SSOT.md`, pero no es una biblia: puede faltar algo o estar desactualizado. Se respeta salvo que Nahuel indique lo contrario.
