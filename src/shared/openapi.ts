@@ -135,9 +135,33 @@ const ventaRegistrada = {
         montoTotal: { type: "string", example: "1500.00" },
         estado: { type: "string", enum: ["COMPLETADA", "PENDIENTE_PAGO"] },
         fechaHora: { type: "string", format: "date-time" },
+        pagos: {
+          type: "array",
+          description: "Arreglo vacío en un fiado. Permite mostrar el vuelto sin consultar de nuevo la venta",
+          items: {
+            type: "object",
+            properties: {
+              idMedioPago: { type: "integer", example: 1 },
+              montoFinal: { type: "string", example: "1650.00" },
+              montoRecibido: {
+                type: "string",
+                nullable: true,
+                example: "2000.00",
+                description: "Nulo si el medio no es efectivo o no se informó el monto recibido",
+              },
+              vuelto: {
+                type: "string",
+                nullable: true,
+                example: "350.00",
+                description: "Monto recibido menos monto final; nulo siempre que montoRecibido sea nulo",
+              },
+            },
+            required: ["idMedioPago", "montoFinal", "montoRecibido", "vuelto"],
+          },
+        },
       },
       // numeroComprobante nunca es nulo: se emite siempre, incluso en un fiado
-      required: ["idVenta", "numeroComprobante", "montoTotal", "estado", "fechaHora"],
+      required: ["idVenta", "numeroComprobante", "montoTotal", "estado", "fechaHora", "pagos"],
     },
   },
 };
@@ -230,7 +254,7 @@ const ventaInexistente = {
   },
 };
 
-/** Respuesta exitosa de `GET /api/ventas/:idVenta` (ver `ConsultarVentaResponse`). Sin costo congelado, montoRecibido ni vuelto. */
+/** Respuesta exitosa de `GET /api/ventas/:idVenta` (ver `ConsultarVentaResponse`). Sin costo congelado. */
 const ventaConsultada = {
   type: "object",
   properties: {
@@ -272,6 +296,12 @@ const ventaConsultada = {
         },
         subtotalBruto: { type: "string", example: "1500.00" },
         descuentoManual: { type: "string", example: "0.00" },
+        motivoDescuento: {
+          type: "string",
+          nullable: true,
+          example: "Cliente frecuente",
+          description: "Nulo si la venta no tuvo descuento o es anterior a que se registrara el motivo",
+        },
         montoTotal: { type: "string", example: "1425.00" },
         items: {
           type: "array",
@@ -303,8 +333,20 @@ const ventaConsultada = {
                 description: "Ajuste neto (recargo − descuento) congelado al registrar; negativo si el medio da descuento",
               },
               montoFinal: { type: "string", example: "1425.00" },
+              montoRecibido: {
+                type: "string",
+                nullable: true,
+                example: "2000.00",
+                description: "Nulo en ventas anteriores, si el medio no es efectivo o si no se informó el monto recibido",
+              },
+              vuelto: {
+                type: "string",
+                nullable: true,
+                example: "575.00",
+                description: "Monto recibido menos monto final; nulo siempre que montoRecibido sea nulo",
+              },
             },
-            required: ["idMedioPago", "nombreMedioPago", "montoBase", "porcentajeAplicado", "montoFinal"],
+            required: ["idMedioPago", "nombreMedioPago", "montoBase", "porcentajeAplicado", "montoFinal", "montoRecibido", "vuelto"],
           },
         },
       },
@@ -320,6 +362,7 @@ const ventaConsultada = {
         "vendedor",
         "subtotalBruto",
         "descuentoManual",
+        "motivoDescuento",
         "montoTotal",
         "items",
         "pagos",
@@ -655,7 +698,12 @@ export const openapiDocument = {
         description:
           "Con `pagos` vacío la venta queda `PENDIENTE_PAGO` (fiado) y exige `clienteReferencia`. " +
           "Descuenta stock y congela precio y costo de cada ítem. Los cobros se asocian a la última caja abierta. " +
-          "Toda venta, cobrada o fiado, devuelve su `numeroComprobante` (ticket de pago o ticket de deuda).",
+          "Toda venta, cobrada o fiado, devuelve su `numeroComprobante` (ticket de pago o ticket de deuda). " +
+          "El vendedor es el usuario del token: un `idUsuario` en el body se ignora sin error. " +
+          "`motivoDescuento` (1 a 200 caracteres) es obligatorio si `descuentoManual` es mayor que 0 y no se admite sin descuento; aplica a venta inmediata y a fiado. " +
+          "`pagos[].montoRecibido` es opcional y solo se admite en un medio EFECTIVO, mayor o igual al monto final de esa línea; " +
+          "el servidor calcula el vuelto (solo registro: la caja suma siempre el monto final). Sin `montoRecibido`, recibido y vuelto quedan nulos. " +
+          `El monto recibido admite hasta ${MONTO_RECIBIDO_MAXIMO} y 2 decimales. La respuesta incluye \`pagos\` con recibido y vuelto (vacío en un fiado).`,
         requestBody: {
           required: true,
           content: {
@@ -671,7 +719,9 @@ export const openapiDocument = {
             content: { "application/json": { schema: ventaRegistrada } },
           },
           "400": {
-            description: "Body inválido o regla de negocio incumplida (stock, montos, producto inactivo)",
+            description:
+              "Body inválido o regla de negocio incumplida (stock, montos, producto inactivo, descuento sin motivo o motivo sin descuento, " +
+              "`montoRecibido` menor al monto final o en un medio que no es efectivo)",
             content: {
               "application/json": { schema: { oneOf: [errorValidacion, errorNegocio] } },
             },
@@ -696,7 +746,8 @@ export const openapiDocument = {
         description:
           "Detalle de una venta con sus ítems y pagos, en cualquier estado (incluida ANULADA). " +
           "Los importes salen tal como se guardaron: precio unitario y porcentaje aplicado de ese momento. " +
-          "El tipo de comprobante se deduce de `estado`. No devuelve el costo congelado ni montoRecibido/vuelto. " +
+          "El tipo de comprobante se deduce de `estado`. No devuelve el costo congelado. " +
+          "Devuelve `motivoDescuento` (nivel venta) y, en cada pago, `montoRecibido` y `vuelto`; son nulos en ventas anteriores o cuando no aplican. " +
           "Solo lectura: no modifica stock, caja ni estado. Cualquier rol autorizado ve cualquier venta " +
           "(VENDEDOR, GESTOR_COMERCIAL o GERENTE); no exige caja abierta.",
         parameters: [parametroIdVenta],
