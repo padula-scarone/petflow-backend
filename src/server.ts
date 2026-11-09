@@ -8,6 +8,7 @@ import { ventasRouter } from "./modules/ventas/ventas.routes.js";
 import { configurarZodEnCastellano } from "./shared/configuracion-zod.js";
 import { manejarErrorInesperado, manejarErrorLecturaCuerpo, manejarRutaInexistente } from "./shared/manejo-errores.js";
 import { openapiDocument } from "./shared/openapi.js";
+import { getSalud } from "./shared/salud.js";
 
 // Los mensajes de validación de Zod salen en castellano. Se configura una sola vez al arrancar,
 // antes de recibir peticiones, porque la configuración de Zod es global a todo el proceso.
@@ -26,6 +27,9 @@ if (origenPermitido) {
 }
 
 app.use(express.json());
+
+// Salud del servicio: pública (sin token) y sin base de datos, para el chequeo de la plataforma de deploy
+app.get("/api/salud", getSalud);
 
 // Documentación interactiva de la API
 app.use("/docs", swaggerUi.serve, swaggerUi.setup(openapiDocument));
