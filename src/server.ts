@@ -5,7 +5,12 @@ import { authRouter } from "./modules/auth/auth.routes.js";
 import { cajaRouter } from "./modules/caja/caja.routes.js";
 import { inventarioRouter } from "./modules/inventario/inventario.routes.js";
 import { ventasRouter } from "./modules/ventas/ventas.routes.js";
+import { configurarZodEnCastellano } from "./shared/configuracion-zod.js";
 import { openapiDocument } from "./shared/openapi.js";
+
+// Los mensajes de validación de Zod salen en castellano. Se configura una sola vez al arrancar,
+// antes de recibir peticiones, porque la configuración de Zod es global a todo el proceso.
+configurarZodEnCastellano();
 
 const app = express();
 
