@@ -44,6 +44,13 @@ Para consultar el modelo de datos relacional, los Casos de Uso Base (CUB) y las 
 - El cliente se genera en `src/generated/prisma/` (ignorado por git).
 - Módulo `ventas` implementado: `POST /api/ventas` (alta de venta cobrada o fiado; el vendedor sale del token, el descuento manual exige `motivoDescuento` y los pagos en efectivo admiten `montoRecibido` con vuelto calculado por el servidor; responde con `pagos[]`), `GET /api/ventas` (historial paginado con filtros por fecha, producto y estado), `GET /api/ventas/:idVenta` (detalle de una venta con ítems y pagos, en cualquier estado, incluidos `motivoDescuento`, `montoRecibido` y `vuelto`, nulos si no aplican) y `POST /api/ventas/:idVenta/cobro` (liquidar un fiado: cobro total con vuelto en efectivo y control de doble cobro). Detalle de reglas: `../petflow-workspace/SSOT.md`.
 - `ventas.motivo_descuento VARCHAR(200) NULL` se aplica a mano en Supabase; Prisma solo lo mapea.
+- **Preparado para deploy (Render + Supabase compartida):** el código transversal vive en `src/shared/` y se monta en `src/server.ts`.
+  - **Errores en JSON** (`manejo-errores.ts`), siempre con la forma `{ exito: false, mensaje }`: 404 por ruta inexistente, 400 por JSON inválido, 413 por cuerpo mayor a 100 kb, 415 por codificación no soportada y 500 genérico por error inesperado (el stack va solo a `console.error`, nunca a la respuesta). Los mensajes de 400/413/415/500 son fijos: no se devuelve el `message` del error. Los errores que ya controla cada módulo (400, 401, 403, 404, 409) no cambian.
+  - **Orden en `server.ts`:** 404, luego `manejarErrorLecturaCuerpo` y al final `manejarErrorInesperado` (firma de 4 argumentos), todo después de las rutas y de `/docs`.
+  - **`GET /api/salud`** (`salud.ts`): público y sin Prisma, responde 200 `{ exito: true, estado: "ok" }`. Documentado en `openapi.ts`.
+  - **Zod en castellano:** `configurarZodEnCastellano()` (`configuracion-zod.ts`) llama una sola vez a `z.config(z.locales.es())` al arrancar. Los mensajes propios de cada esquema no se tocan.
+  - **Scripts:** `build` = `prisma generate && tsc -p tsconfig.json` y `start` = `node dist/server.js`. `prisma generate` exige `DIRECT_URL` (la lee `prisma.config.ts`) aunque no se conecte a la base, por eso hay que definirla también en el build de Render. `engines.node` = `^22.12.0 || ^24.0.0` (Prisma 7).
+  - **Render:** Build Command `npm ci --include=dev && npm run build` (`typescript` y `prisma` están en devDependencies) y Start Command `npm start`.
 
 # Criterio sobre el SSOT
 - La fuente de verdad es `../petflow-workspace/SSOT.md`, pero no es una biblia: puede faltar algo o estar desactualizado. Se respeta salvo que Nahuel indique lo contrario.

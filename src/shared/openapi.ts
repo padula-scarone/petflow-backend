@@ -25,6 +25,16 @@ const errorNegocio = {
   },
 };
 
+/** Respuesta de `GET /api/salud` (ver `getSalud` en `salud.ts`). */
+const estadoSalud = {
+  type: "object",
+  properties: {
+    exito: { type: "boolean", example: true },
+    estado: { type: "string", example: "ok" },
+  },
+  required: ["exito", "estado"],
+};
+
 /**
  * Error de autenticación o autorización (401/403): lo devuelve el login o el middleware `requerirRol`.
  * Cada respuesta lleva su propio mensaje de ejemplo, el mismo que produce `auth.errors.ts`.
@@ -583,6 +593,7 @@ export const openapiDocument = {
     { name: "Ventas", description: "Alta y gestión de ventas" },
     { name: "Inventario", description: "Catálogo de productos" },
     { name: "Caja", description: "Medios de pago" },
+    { name: "Sistema", description: "Estado del servicio" },
   ],
   components: {
     securitySchemes: {
@@ -595,6 +606,21 @@ export const openapiDocument = {
     },
   },
   paths: {
+    "/api/salud": {
+      get: {
+        tags: ["Sistema"],
+        summary: "Comprobar que el servicio está activo",
+        description:
+          "Chequeo de salud para la plataforma de deploy. Público: no requiere token. " +
+          "No consulta la base de datos, así que responde 200 aunque la base no esté disponible.",
+        responses: {
+          "200": {
+            description: "El servicio está activo",
+            content: { "application/json": { schema: estadoSalud } },
+          },
+        },
+      },
+    },
     "/api/auth/login": {
       post: {
         tags: ["Seguridad"],
