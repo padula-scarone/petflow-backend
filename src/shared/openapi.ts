@@ -3,6 +3,7 @@ import { iniciarSesionSchema } from "../modules/auth/auth.schemas.js";
 import { consultarProductosSchema, BUSQUEDA_LONGITUD_MAXIMA } from "../modules/inventario/inventario.schemas.js";
 import {
   CANTIDAD_POR_PAGINA_MAXIMA,
+  anularVentaCuerpoSchema,
   CANTIDAD_POR_PAGINA_PREDETERMINADA,
   consultarHistorialSchema,
   consultarVentaSchema,
@@ -16,7 +17,7 @@ import {
 
 // --- ESQUEMAS REUTILIZABLES ---
 
-/** Error de negocio (400/404/409): lo devuelve el controller al capturar un `ErrorNegocio`. */
+/** Error de negocio (400/403/404/409): lo devuelve el controller al capturar un `ErrorNegocio`. */
 const errorNegocio = {
   type: "object",
   properties: {
@@ -359,6 +360,27 @@ const ventaConsultada = {
             required: ["idMedioPago", "nombreMedioPago", "montoBase", "porcentajeAplicado", "montoFinal", "montoRecibido", "vuelto"],
           },
         },
+        anulacion: {
+          type: "object",
+          nullable: true,
+          description:
+            "Auditoría de la anulación: quién, cuándo y por qué. Nulo si la venta no está ANULADA o si se anuló " +
+            "antes de que se registrara la auditoría",
+          properties: {
+            fechaHora: { type: "string", format: "date-time", example: "2026-11-12T20:35:10.000Z" },
+            motivo: { type: "string", example: "El cliente cambió de producto" },
+            usuario: {
+              type: "object",
+              description: "Quien anuló: puede ser distinto del vendedor original",
+              properties: {
+                idUsuario: { type: "integer", example: 2 },
+                nombre: { type: "string", example: "Gestor Comercial Demo" },
+              },
+              required: ["idUsuario", "nombre"],
+            },
+          },
+          required: ["fechaHora", "motivo", "usuario"],
+        },
       },
       required: [
         "idVenta",
@@ -376,6 +398,7 @@ const ventaConsultada = {
         "montoTotal",
         "items",
         "pagos",
+        "anulacion",
       ],
     },
   },
@@ -451,6 +474,61 @@ const fiadoCobrado = {
         },
       },
       required: ["idVenta", "numeroComprobante", "estado", "montoTotal", "fechaHoraPago", "pagos"],
+    },
+  },
+  required: ["exito", "mensaje", "venta"],
+};
+
+// --- ANULACIÓN DE VENTA ---
+
+/** Error de validación (400) de la anulación: mismo formato, con el mensaje y los campos propios del body (`motivo`). */
+const errorValidacionAnulacionVenta = {
+  ...errorValidacion,
+  properties: {
+    ...errorValidacion.properties,
+    mensaje: { type: "string", example: "Datos de anulación inválidos" },
+    errores: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          campo: { type: "string", example: "motivo" },
+          mensaje: { type: "string", example: "El motivo de la anulación es obligatorio y debe ser texto" },
+        },
+      },
+    },
+  },
+};
+
+/** Respuesta exitosa de `POST /api/ventas/:idVenta/anulacion` (ver `AnularVentaResponse`). */
+const ventaAnulada = {
+  type: "object",
+  properties: {
+    exito: { type: "boolean", example: true },
+    mensaje: { type: "string", example: "Venta anulada, cobro revertido y stock repuesto" },
+    venta: {
+      type: "object",
+      properties: {
+        idVenta: { type: "integer", example: 42 },
+        numeroComprobante: { type: "string", nullable: true, example: "CMP-00000042" },
+        estado: { type: "string", enum: ["ANULADA"], example: "ANULADA" },
+        estadoAnterior: {
+          type: "string",
+          enum: ["COMPLETADA", "PENDIENTE_PAGO"],
+          example: "COMPLETADA",
+          description: "Estado que tenía antes de anularse: COMPLETADA (cobro revertido) o PENDIENTE_PAGO (solo stock)",
+        },
+        anulacion: {
+          type: "object",
+          description: "Auditoría de la anulación recién hecha. El usuario que anuló lo trae `GET /api/ventas/{idVenta}`",
+          properties: {
+            fechaHora: { type: "string", format: "date-time", example: "2026-11-12T20:35:10.000Z" },
+            motivo: { type: "string", example: "El cliente cambió de producto" },
+          },
+          required: ["fechaHora", "motivo"],
+        },
+      },
+      required: ["idVenta", "numeroComprobante", "estado", "estadoAnterior", "anulacion"],
     },
   },
   required: ["exito", "mensaje", "venta"],
@@ -774,6 +852,7 @@ export const openapiDocument = {
           "Los importes salen tal como se guardaron: precio unitario y porcentaje aplicado de ese momento. " +
           "El tipo de comprobante se deduce de `estado`. No devuelve el costo congelado. " +
           "Devuelve `motivoDescuento` (nivel venta) y, en cada pago, `montoRecibido` y `vuelto`; son nulos en ventas anteriores o cuando no aplican. " +
+          "Devuelve `anulacion` (fecha, motivo y usuario que anuló), nula si la venta no está ANULADA o se anuló antes de que se registrara la auditoría. " +
           "Solo lectura: no modifica stock, caja ni estado. Cualquier rol autorizado ve cualquier venta " +
           "(VENDEDOR, GESTOR_COMERCIAL o GERENTE); no exige caja abierta.",
         parameters: [parametroIdVenta],
@@ -843,6 +922,87 @@ export const openapiDocument = {
             content: { "application/json": { schema: errorNegocio } },
           },
           ...respuestasProteccion,
+        },
+      },
+    },
+    "/api/ventas/{idVenta}/anulacion": {
+      post: {
+        tags: ["Ventas"],
+        security: [{ bearerAuth: [] }],
+        summary: "Anular una venta (baja y modificación)",
+        description:
+          "Anula una venta `COMPLETADA` o `PENDIENTE_PAGO` dentro de una ventana de 15 minutos, contada desde `fechaHoraPago` " +
+          "si existe (un fiado cobrado vuelve a tener 15 minutos desde el cobro) y si no desde `fechaHora`; el reloj es el del servidor. " +
+          "Es una baja lógica: la venta pasa a `ANULADA` y no se borra ni se edita ningún pago. Repone el stock de cada ítem " +
+          "(la misma cantidad vendida al mismo producto) en la misma transacción. Una venta con cobro (`COMPLETADA`) exige alguna caja " +
+          "abierta (409 si no hay); un fiado pendiente solo repone stock. La caja se revierte por el solo cambio de estado: " +
+          "las ventas `ANULADA` no cuentan como ingreso. " +
+          "El body exige `motivo` (texto de 1 a 200 caracteres, recortado): vale tanto para la baja como para la edición. " +
+          "La anulación deja auditoría en la misma operación que cambia el estado: quién (el usuario del token, no el vendedor original), " +
+          "cuándo (reloj del servidor) y por qué; un `idUsuario` en el body se ignora. La respuesta trae `anulacion` con la fecha y el motivo, " +
+          "y `GET /api/ventas/{idVenta}` la devuelve completa, con el usuario (nula en una venta no anulada o anulada antes de que se registrara). " +
+          "Una venta `ANULADA` no se puede anular de nuevo (la auditoría original no se modifica) ni cobrar (409). " +
+          "Ante pedidos simultáneos sobre la misma venta (dos anulaciones, o un cobro y una anulación) solo uno gana y el otro responde 409. " +
+          "Orden de evaluación: 400, 404, 409 (ya anulada), 403 (ventana vencida), 409 (sin caja abierta). " +
+          "**Edición ágil (modificar una venta):** no hay un endpoint aparte. El front anula con este endpoint, consulta el detalle " +
+          "con `GET /api/ventas/{idVenta}` (que sigue funcionando sobre una venta `ANULADA` y trae ítems, descuento, motivo, origen, " +
+          "modalidad, cliente y pagos) y vuelve a registrar la venta con `POST /api/ventas`. Son tres llamadas independientes: " +
+          "si la última falla, la venta original queda anulada. Al volver a vender se aplican los precios y recargos vigentes ese día, " +
+          "así que el total puede diferir del original.",
+        parameters: [parametroIdVenta],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              // `io: "input"` describe lo que el cliente envía, no el resultado ya transformado
+              schema: z.toJSONSchema(anularVentaCuerpoSchema, { io: "input", target: "draft-7" }),
+            },
+          },
+        },
+        responses: {
+          "200": {
+            description: "Venta anulada, stock repuesto y auditoría registrada",
+            content: { "application/json": { schema: ventaAnulada } },
+          },
+          "400": {
+            description:
+              "`idVenta` inválido, o `motivo` ausente, vacío, solo espacios, que no es texto o de más de 200 caracteres " +
+              "(se valida antes de consultar la venta)",
+            content: {
+              "application/json": { schema: { oneOf: [errorValidacionConsultaVenta, errorValidacionAnulacionVenta] } },
+            },
+          },
+          "401": respuestasProteccion["401"],
+          "403": {
+            description:
+              "Pasaron más de 15 minutos desde el pago (o desde la venta si no hay pago): " +
+              "mensaje propio de negocio con el formato `{ exito: false, mensaje }`. " +
+              "También responde 403, con otro mensaje, si el rol del usuario no está permitido",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    exito: { type: "boolean", example: false },
+                    mensaje: {
+                      type: "string",
+                      example: "No se puede anular: pasaron más de 15 minutos desde la venta",
+                    },
+                  },
+                },
+              },
+            },
+          },
+          "404": {
+            description: "La venta no existe",
+            content: { "application/json": { schema: ventaInexistente } },
+          },
+          "409": {
+            description:
+              "La venta ya está ANULADA, cambió de estado mientras se procesaba (otra anulación o un cobro simultáneo), " +
+              "o tuvo cobro y no hay ninguna caja abierta",
+            content: { "application/json": { schema: errorNegocio } },
+          },
         },
       },
     },
