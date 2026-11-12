@@ -1,8 +1,16 @@
 import type { Prisma } from "../../generated/prisma/client.js";
 import { prisma } from "../../shared/prisma.js";
-import { crearErrorDobleCobro, crearErrorNegocio, crearErrorStockInsuficiente } from "./ventas.errors.js";
+import {
+  crearErrorAnulacionSimultanea,
+  crearErrorDobleCobro,
+  crearErrorNegocio,
+  crearErrorStockInsuficiente,
+} from "./ventas.errors.js";
 import type {
+  AnulacionPersistida,
+  AnularVentaInput,
   CobroFiadoCalculado,
+  DecisionAnulacion,
   CobroFiadoPersistido,
   EstadoVenta,
   FiltroHistorialVentas,
@@ -14,6 +22,7 @@ import type {
   RegistrarVentaInput,
   TotalesVentaCalculados,
   VentaAdeudada,
+  VentaAnulable,
   VentaDetallada,
 } from "./ventas.types.js";
 
@@ -39,6 +48,12 @@ type CalcularVenta = (
 
 /** Función de cálculo del cobro que inyecta el service; recibe la venta (o `null`) y los medios leídos. */
 type CalcularCobroFiado = (venta: VentaAdeudada | null, medios: MedioPagoVigente[]) => CobroFiadoCalculado;
+
+/**
+ * Función de evaluación de la anulación que inyecta el service; recibe la venta (o `null`) y si hay una caja abierta.
+ * Lanza el error de negocio que corresponda o devuelve el estado a anular y el límite de la ventana.
+ */
+type EvaluarAnulacion = (venta: VentaAnulable | null, hayCajaAbierta: boolean) => DecisionAnulacion;
 
 // --- ALTA DE VENTA ---
 
@@ -290,6 +305,102 @@ export async function liquidarFiadoAtomico(
   });
 }
 
+// --- ANULACIÓN DE VENTA ---
+
+/**
+ * Anula una venta y repone su stock en una única transacción.
+ * Es la única capa que toca Prisma en esta acción. Si algo falla (venta, ventana, caja, carrera, BD)
+ * se revierte todo: no queda la venta anulada sin stock repuesto ni stock repuesto sin anular.
+ * Usa el nivel de aislamiento predeterminado (READ COMMITTED) a propósito: ante dos operaciones simultáneas
+ * sobre la misma venta, la segunda espera el bloqueo de fila de la primera y luego ve el estado ya cambiado (409),
+ * sin error de serialización.
+ * Baja lógica: no se borra ni se edita ningún pago ni `idCaja`; la reversión de caja es pasar a ANULADA.
+ * La auditoría (fecha, usuario y motivo) se escribe en el mismo UPDATE que el estado.
+ * @param input Parámetro de ruta, motivo validado y usuario del token.
+ * @param evaluar Evaluación de negocio, ejecutada dentro de la transacción con datos recién leídos.
+ * @returns Los datos de la anulación persistida.
+ * @throws {ErrorNegocio} Las de la evaluación (404/409/403/409) o una operación simultánea que cambió
+ * el estado de la venta antes de esta (409). Se lanza como objeto puro, no como Error.
+ */
+export async function anularVentaAtomica(
+  input: AnularVentaInput,
+  evaluar: EvaluarAnulacion,
+): Promise<AnulacionPersistida> {
+  return prisma.$transaction(async (transaccion) => {
+    // --- LECTURA Y EVALUACIÓN ---
+    const ventaLeida = await transaccion.venta.findUnique({
+      where: { idVenta: input.idVenta },
+      select: { idVenta: true, numeroComprobante: true, estado: true, fechaHora: true, fechaHoraPago: true },
+    });
+
+    // Cualquier caja abierta sirve (no hace falta la del cobro original). Se lee siempre y el service decide
+    // si hace falta: así la regla "solo una venta con cobro exige caja" queda fuera del repositorio
+    const cajaAbierta = await transaccion.sesionCaja.findFirst({
+      where: { estado: "ABIERTA" },
+      select: { idCaja: true },
+    });
+
+    const decision = evaluar(ventaLeida, cajaAbierta !== null);
+
+    // --- CAMBIO DE ESTADO CONDICIONADO ---
+    // El estado y la ventana se exigen en el where del UPDATE y no en un if después del SELECT:
+    // entre la lectura y la escritura otra transacción pudo cobrar o anular esta venta, y un if sobre
+    // lo leído la dejaría pasar dos veces. El UPDATE toma el bloqueo de fila y, si otra transacción la cambió,
+    // vuelve a evaluar el where sobre la fila nueva: no coincide, count vale 0 y se aborta con 409.
+    // Prisma no tiene COALESCE: "fechaHoraPago ?? fechaHora" se expresa con OR
+    // (pago reciente, o sin pago y venta reciente).
+    const actualizadas = await transaccion.venta.updateMany({
+      where: {
+        idVenta: input.idVenta,
+        estado: decision.estadoAnterior,
+        OR: [
+          { fechaHoraPago: { gte: decision.limiteVentana } },
+          { fechaHoraPago: null, fechaHora: { gte: decision.limiteVentana } },
+        ],
+      },
+      // La auditoría va en el mismo UPDATE que el estado: o se anula con su quién, cuándo y por qué, o no se escribe nada.
+      // Una venta ya ANULADA nunca coincide con el where, así que su auditoría original no se pisa.
+      // Quien anula sale del token (input.idUsuario), no del vendedor original de la venta.
+      data: {
+        estado: "ANULADA",
+        fechaHoraAnulacion: decision.fechaHoraAnulacion,
+        idUsuarioAnulacion: input.idUsuario,
+        motivoAnulacion: input.motivo,
+      },
+    });
+    if (actualizadas.count !== 1) {
+      throw crearErrorAnulacionSimultanea(input.idVenta);
+    }
+
+    // --- REPOSICIÓN DE STOCK ---
+    // Va DESPUÉS de verificar el count: solo la transacción que ganó la transición repone, así el stock
+    // vuelve una sola vez. Los detalles se leen aquí adentro, ya con la venta bloqueada por esta transacción.
+    const detalles = await transaccion.detalleVenta.findMany({
+      where: { idVenta: input.idVenta },
+      // Orden fijo por producto: dos anulaciones simultáneas que comparten productos bloquean las filas
+      // en el mismo orden y no se traban entre sí (deadlock)
+      orderBy: [{ idProducto: "asc" }, { idDetalle: "asc" }],
+      select: { idProducto: true, cantidad: true },
+    });
+    for (const detalle of detalles) {
+      // Incremento atómico en la BD con el decimal exacto leído: sin pasar por coma flotante ni leer el stock antes.
+      // Sin tope ni conversión UNIDAD/GRANEL: se devuelve al mismo producto la cantidad que salió
+      await transaccion.producto.update({
+        where: { idProducto: detalle.idProducto },
+        data: { stockFisico: { increment: detalle.cantidad } },
+      });
+    }
+
+    return {
+      idVenta: input.idVenta,
+      numeroComprobante: decision.numeroComprobante,
+      estadoAnterior: decision.estadoAnterior,
+      fechaHoraAnulacion: decision.fechaHoraAnulacion,
+      motivo: input.motivo,
+    };
+  });
+}
+
 // --- CONSULTA DE HISTORIAL ---
 
 /**
@@ -398,6 +509,10 @@ export async function buscarVentaPorId(idVenta: number): Promise<VentaDetallada 
       motivoDescuento: true,
       montoTotal: true,
       usuario: { select: { idUsuario: true, nombre: true } },
+      // Auditoría de la anulación: nula en ventas no anuladas y en las anuladas antes de registrarla
+      fechaHoraAnulacion: true,
+      motivoAnulacion: true,
+      usuarioAnulacion: { select: { idUsuario: true, nombre: true } },
       detalles: {
         orderBy: { idDetalle: "asc" },
         select: {
@@ -458,6 +573,15 @@ export async function buscarVentaPorId(idVenta: number): Promise<VentaDetallada 
       montoRecibidoCentavos: pago.montoRecibido === null ? null : aCentavos(pago.montoRecibido),
       vueltoCentavos: pago.vuelto === null ? null : aCentavos(pago.vuelto),
     })),
+    // Solo se arma si están las tres columnas: es lo que escribe una anulación completa; cualquier otro caso es nulo
+    anulacion:
+      venta.fechaHoraAnulacion === null || venta.motivoAnulacion === null || venta.usuarioAnulacion === null
+        ? null
+        : {
+            fechaHora: venta.fechaHoraAnulacion,
+            motivo: venta.motivoAnulacion,
+            usuario: { idUsuario: venta.usuarioAnulacion.idUsuario, nombre: venta.usuarioAnulacion.nombre },
+          },
   };
 }
 

@@ -278,3 +278,33 @@ export const consultarVentaSchema = z.object({
 export const liquidarFiadoParametrosSchema = z.object({
   idVenta: enteroDesdeTexto(1, ID_VENTA_MAXIMO),
 });
+
+// --- ANULACIÓN DE VENTA: PARÁMETRO DE RUTA ---
+
+/**
+ * Contrato de entrada del parámetro de ruta de `POST /api/ventas/:idVenta/anulacion` (el body es `anularVentaCuerpoSchema`).
+ * Reutiliza el esquema de la consulta (entero positivo hasta `ID_VENTA_MAXIMO`, conversión estricta)
+ * en lugar de declarar uno idéntico: así el tope del id no puede divergir entre rutas.
+ */
+export const anularVentaParametrosSchema = consultarVentaSchema;
+
+// --- ANULACIÓN DE VENTA: BODY ---
+
+/** Largo máximo de `motivo` de la anulación: coincide con la columna VARCHAR(200). */
+export const MOTIVO_ANULACION_LONGITUD_MAXIMA = 200;
+
+/**
+ * Contrato de entrada del body de `POST /api/ventas/:idVenta/anulacion`: el motivo es obligatorio
+ * tanto en la baja como en la edición (es la misma operación). Se recorta antes de medirlo, así que
+ * un texto de solo espacios se rechaza. Las claves desconocidas (por ejemplo `idUsuario`) se descartan:
+ * quien anula sale siempre del token.
+ * La cadena de validación repite a propósito la de `motivoDescuento` en `registrarVentaSchema` para no
+ * tocar el alta, que ya está probada; unificar ambas queda como deuda técnica.
+ */
+export const anularVentaCuerpoSchema = z.object({
+  motivo: z
+    .string({ error: "El motivo de la anulación es obligatorio y debe ser texto" })
+    .trim()
+    .min(1, "El motivo de la anulación no puede estar vacío")
+    .max(MOTIVO_ANULACION_LONGITUD_MAXIMA, `El motivo de la anulación admite hasta ${MOTIVO_ANULACION_LONGITUD_MAXIMA} caracteres`),
+});

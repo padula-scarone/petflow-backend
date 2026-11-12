@@ -3,6 +3,7 @@ import { requerirRol } from "../auth/auth.middleware.js";
 import {
   getConsultarHistorial,
   getConsultarVenta,
+  postAnularVenta,
   postLiquidarFiado,
   postRegistrarVenta,
 } from "./ventas.controller.js";
@@ -23,3 +24,6 @@ ventasRouter.get("/:idVenta", requerirRol("VENDEDOR", "GESTOR_COMERCIAL", "GEREN
 
 // POST /api/ventas/:idVenta/cobro: liquidar un fiado (cobro total, sin límite de tiempo). Requiere sesión validada y caja abierta (CUB 1.2)
 ventasRouter.post("/:idVenta/cobro", requerirRol("VENDEDOR", "GESTOR_COMERCIAL", "GERENTE"), postLiquidarFiado);
+
+// POST /api/ventas/:idVenta/anulacion: anular una venta (baja y modificacion venta) dentro de 15 min, con reposicion de stock y auditoria. El body exige el motivo. Requiere sesion validada (CUB 1.2)
+ventasRouter.post("/:idVenta/anulacion", requerirRol("VENDEDOR", "GESTOR_COMERCIAL", "GERENTE"), postAnularVenta);
