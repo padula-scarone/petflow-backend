@@ -67,7 +67,8 @@ enum ModalidadEntrega {
 
 // COMPLETADA: tiene ticket de pago, pago registrado e impacto en caja
 // PENDIENTE_PAGO: fiado, descontó stock y tiene detalles y ticket de deuda, sin pago ni impacto en caja
-// ANULADA: baja lógica, revirtió stock (y caja si ya estaba COMPLETADA)
+// ANULADA: baja lógica. Repone el stock; no reescribe pagos, idCaja ni saldo de caja (la venta deja de contar por su estado).
+// Guarda quién, cuándo y por qué se anuló en fechaHoraAnulacion, idUsuarioAnulacion y motivoAnulacion
 enum EstadoVenta {
   COMPLETADA
   PENDIENTE_PAGO
@@ -94,6 +95,7 @@ model Usuario {
 
   sesionesCaja SesionCaja[]
   ventas       Venta[]
+  ventasAnuladas Venta[] @relation("VentaUsuarioAnulacion")
   cambios      CambioMercaderia[]
 
   @@map("usuarios")
@@ -197,8 +199,14 @@ model Venta {
   idUsuario         Int              @map("id_usuario")
   // Nulo mientras el fiado no se cobra
   idCaja            Int?             @map("id_caja")
+  // Auditoría de la anulación: nulos mientras la venta no está ANULADA y en anulaciones anteriores a este registro
+  fechaHoraAnulacion DateTime?       @map("fecha_hora_anulacion") @db.Timestamptz(6)
+  idUsuarioAnulacion Int?            @map("id_usuario_anulacion")
+  motivoAnulacion    String?         @map("motivo_anulacion") @db.VarChar(200)
 
   usuario  Usuario      @relation(fields: [idUsuario], references: [idUsuario])
+  // Quien anuló (puede ser distinto del vendedor); relación con nombre propio porque Venta ya apunta a Usuario por `usuario`
+  usuarioAnulacion Usuario? @relation("VentaUsuarioAnulacion", fields: [idUsuarioAnulacion], references: [idUsuario])
   caja     SesionCaja?  @relation(fields: [idCaja], references: [idCaja])
   pagos    PagoVenta[]
   detalles DetalleVenta[]
