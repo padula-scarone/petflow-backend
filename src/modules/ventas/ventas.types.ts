@@ -1,5 +1,7 @@
 import type { z } from "zod";
 import type {
+  anularVentaCuerpoSchema,
+  anularVentaParametrosSchema,
   consultarHistorialSchema,
   consultarVentaSchema,
   ESTADOS_VENTA_HISTORIAL,
@@ -253,6 +255,8 @@ export type VentaDetallada = {
   items: ItemVentaDetallado[];
   /** Vacío en un fiado no cobrado. */
   pagos: PagoVentaDetallado[];
+  /** Nulo si la venta no está ANULADA o si se anuló antes de que se registrara la auditoría. */
+  anulacion: AnulacionVenta | null;
 };
 
 // --- CONSULTA DE UNA VENTA: RESPUESTA HTTP ---
@@ -304,6 +308,8 @@ export type VentaConsultada = {
   items: ItemVentaConsultado[];
   /** Arreglo vacío si es un ticket de deuda (PENDIENTE_PAGO). */
   pagos: PagoVentaConsultado[];
+  /** Nulo si la venta no está ANULADA o si se anuló antes de que se registrara la auditoría. */
+  anulacion: AnulacionConsultada | null;
 };
 
 /** Respuesta exitosa de `GET /api/ventas/:idVenta`. */
@@ -396,4 +402,102 @@ export type LiquidarFiadoResponse = {
     fechaHoraPago: string;
     pagos: PagoCobrado[];
   };
+};
+
+// --- ANULACIÓN DE VENTA: ENTRADA ---
+
+/** Parámetro de ruta validado de `POST /api/ventas/:idVenta/anulacion`, inferido del esquema Zod. */
+export type AnularVentaParametros = z.infer<typeof anularVentaParametrosSchema>;
+
+/** Body validado de `POST /api/ventas/:idVenta/anulacion` (el motivo ya viene recortado), inferido del esquema Zod. */
+export type AnularVentaCuerpo = z.infer<typeof anularVentaCuerpoSchema>;
+
+/** Entrada completa de la anulación: la venta de la ruta, el motivo del body y quien anula, que viene del token ya verificado. */
+export type AnularVentaInput = AnularVentaParametros &
+  AnularVentaCuerpo & {
+    /** Usuario de la sesión que anula (no necesariamente el vendedor original); nunca se toma del body. */
+    idUsuario: number;
+  };
+
+/**
+ * Estados desde los que se puede anular una venta: cobrada (inmediata o fiado ya cobrado) o fiado pendiente.
+ * Tipo aparte de `EstadoVenta` (que describe cómo nace una venta) aunque hoy coincidan los valores.
+ */
+export type EstadoVentaAnulable = "COMPLETADA" | "PENDIENTE_PAGO";
+
+// --- ANULACIÓN DE VENTA: DATOS DE LA BASE ---
+
+/** Venta leída para anularla: solo lo necesario para validar su estado y la ventana de tiempo. */
+export type VentaAnulable = {
+  idVenta: number;
+  /** Se devuelve tal cual en la respuesta. Nulo solo en datos anteriores al backfill. */
+  numeroComprobante: string | null;
+  /** Cualquier estado: el service rechaza ANULADA. */
+  estado: EstadoVentaHistorial;
+  /** Origen de la ventana si la venta no tiene fecha de pago. */
+  fechaHora: Date;
+  /** Origen de la ventana si existe: nulo mientras el fiado no se cobra. */
+  fechaHoraPago: Date | null;
+};
+
+/** Resultado de `evaluarAnulacion`: la venta se puede anular y estos son los datos para transicionarla. */
+export type DecisionAnulacion = {
+  /** Comprobante de la venta, para devolverlo en la respuesta sin volver a leerla. */
+  numeroComprobante: string | null;
+  /** Estado leído: la transición exige que siga siendo este al momento de escribir. */
+  estadoAnterior: EstadoVentaAnulable;
+  /** Instante mínimo vigente: la fecha de referencia de la venta debe ser mayor o igual a este valor. */
+  limiteVentana: Date;
+  /** Instante de la anulación: el mismo `ahora` de la evaluación, para que ventana y auditoría usen un único reloj. */
+  fechaHoraAnulacion: Date;
+};
+
+// --- ANULACIÓN DE VENTA: DATOS PERSISTIDOS Y RESPUESTA HTTP ---
+
+/** Datos de la anulación ya guardada que necesita el service para armar la respuesta. */
+export type AnulacionPersistida = {
+  idVenta: number;
+  numeroComprobante: string | null;
+  estadoAnterior: EstadoVentaAnulable;
+  /** Instante en que se anuló, tal como quedó guardado. */
+  fechaHoraAnulacion: Date;
+  /** Motivo recortado, tal como quedó guardado. */
+  motivo: string;
+};
+
+/** Respuesta exitosa de `POST /api/ventas/:idVenta/anulacion`. */
+export type AnularVentaResponse = {
+  exito: true;
+  mensaje: string;
+  venta: {
+    idVenta: number;
+    numeroComprobante: string | null;
+    estado: "ANULADA";
+    /** Estado que tenía antes: permite al front saber si hubo cobro revertido o solo stock repuesto. */
+    estadoAnterior: EstadoVentaAnulable;
+    /** Auditoría de la anulación recién hecha. El usuario no viaja aquí: lo trae `GET /api/ventas/:idVenta`. */
+    anulacion: {
+      /** Fecha y hora de la anulación en formato ISO 8601. */
+      fechaHora: string;
+      motivo: string;
+    };
+  };
+};
+
+// --- ANULACIÓN DE VENTA: AUDITORÍA EN LA CONSULTA ---
+
+/** Auditoría de una venta anulada, tal como la entrega el repositorio. */
+export type AnulacionVenta = {
+  fechaHora: Date;
+  motivo: string;
+  /** Quien anuló: puede ser distinto del vendedor original. */
+  usuario: { idUsuario: number; nombre: string };
+};
+
+/** Auditoría de una venta anulada en la respuesta de `GET /api/ventas/:idVenta`. */
+export type AnulacionConsultada = {
+  /** Fecha y hora de la anulación en formato ISO 8601. */
+  fechaHora: string;
+  motivo: string;
+  usuario: { idUsuario: number; nombre: string };
 };

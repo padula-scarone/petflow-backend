@@ -1,13 +1,30 @@
-import { buscarHistorialVentas, buscarVentaPorId, liquidarFiadoAtomico, registrarVentaAtomica } from "./ventas.repository.js";
-import { crearErrorNegocio, crearErrorStockInsuficiente, crearErrorVentaNoPendientePago } from "./ventas.errors.js";
+import {
+  anularVentaAtomica,
+  buscarHistorialVentas,
+  buscarVentaPorId,
+  liquidarFiadoAtomico,
+  registrarVentaAtomica,
+} from "./ventas.repository.js";
+import {
+  crearErrorNegocio,
+  crearErrorSinCajaParaAnular,
+  crearErrorStockInsuficiente,
+  crearErrorVentaNoPendientePago,
+  crearErrorVentaYaAnulada,
+  crearErrorVentanaAnulacionVencida,
+} from "./ventas.errors.js";
 import { descomponerFechaCalendario } from "./ventas.schemas.js";
 import type {
+  AnulacionPersistida,
+  AnularVentaInput,
+  AnularVentaResponse,
   CobroFiadoCalculado,
   CobroFiadoPersistido,
   ConsultarHistorialInput,
   ConsultarHistorialResponse,
   ConsultarVentaInput,
   ConsultarVentaResponse,
+  DecisionAnulacion,
   FilaHistorialVenta,
   FiltroHistorialVentas,
   ItemVentaConsultado,
@@ -26,6 +43,7 @@ import type {
   TipoMedioPago,
   TotalesVentaCalculados,
   VentaAdeudada,
+  VentaAnulable,
   VentaDetallada,
   VentaHistorial,
 } from "./ventas.types.js";
@@ -34,6 +52,15 @@ import type {
 
 /** Horas que Argentina (UTC-3, sin horario de verano) está por detrás de UTC. */
 const HORAS_DESFASE_ARGENTINA_RESPECTO_UTC = 3;
+
+/**
+ * Minutos que dura la ventana para anular una venta, contados desde el pago (o desde la venta si no hay pago).
+ * Se exporta para que los cambios de mercadería reutilicen la misma regla.
+ */
+export const LIMITE_MINUTOS_ANULACION = 15;
+
+/** Milisegundos que dura un minuto, para convertir la ventana a un instante. */
+const MILISEGUNDOS_POR_MINUTO = 60_000;
 
 // --- ORQUESTACIÓN ---
 
@@ -404,6 +431,15 @@ function convertirVentaDetallada(venta: VentaDetallada): ConsultarVentaResponse[
     montoTotal: formatearCentavos(venta.montoTotalCentavos),
     items: venta.items.map(convertirItemVenta),
     pagos: venta.pagos.map(convertirPagoVenta),
+    // Solo una venta anulada tiene auditoría; las anuladas antes de registrarla también devuelven null
+    anulacion:
+      venta.anulacion === null
+        ? null
+        : {
+            fechaHora: venta.anulacion.fechaHora.toISOString(),
+            motivo: venta.anulacion.motivo,
+            usuario: venta.anulacion.usuario,
+          },
   };
 }
 
@@ -566,5 +602,104 @@ function convertirPagoCobrado(pago: PagoCobroCalculado): PagoCobrado {
     montoFinal: formatearCentavos(pago.montoFinalCentavos),
     montoRecibido: formatearCentavosOpcional(pago.montoRecibidoCentavos),
     vuelto: formatearCentavosOpcional(pago.vueltoCentavos),
+  };
+}
+
+// --- ANULACIÓN DE VENTA: ORQUESTACIÓN ---
+
+/**
+ * Anula una venta (baja venta y modificación venta son esta misma operación): evalúa las reglas puras
+ * y persiste la transición y la reposición de stock en una única transacción.
+ * La evaluación se inyecta al repositorio como función para que corra dentro de la transacción,
+ * con la venta y la caja leídas en ese mismo momento y con el reloj tomado en ese instante.
+ * La anulación deja auditoría (quién, cuándo y por qué) en la misma operación que cambia el estado.
+ * @param input Parámetro de ruta y motivo ya validados por Zod, más el usuario del token.
+ * @returns Respuesta lista para enviar al frontend.
+ * @throws {ErrorNegocio} Si alguna regla de negocio no se cumple (nada queda escrito).
+ */
+export async function anularVenta(input: AnularVentaInput): Promise<AnularVentaResponse> {
+  const anulacion = await anularVentaAtomica(input, (venta, hayCajaAbierta) =>
+    // El reloj se toma aquí, dentro de la transacción: así la espera de conexión o de bloqueos no le regala tiempo a la ventana
+    evaluarAnulacion(input, venta, new Date(), hayCajaAbierta),
+  );
+
+  return {
+    exito: true,
+    mensaje:
+      anulacion.estadoAnterior === "COMPLETADA"
+        ? "Venta anulada, cobro revertido y stock repuesto"
+        : "Venta pendiente de pago anulada y stock repuesto",
+    venta: convertirAnulacionPersistida(anulacion),
+  };
+}
+
+// --- ANULACIÓN DE VENTA: REGLAS PURAS ---
+
+/**
+ * Calcula el instante mínimo vigente para anular: ahora menos la ventana.
+ * @param ahora Instante de referencia (reloj del servidor).
+ */
+export function calcularLimiteVentana(ahora: Date): Date {
+  return new Date(ahora.getTime() - LIMITE_MINUTOS_ANULACION * MILISEGUNDOS_POR_MINUTO);
+}
+
+/**
+ * Aplica las reglas de negocio de la anulación sin acceder a la base de datos ni al reloj.
+ * Es pura a propósito: así se prueba con datos de ejemplo sin conectarse a Supabase.
+ * El orden de las comprobaciones es parte del contrato: 404, 409 (ya anulada), 403 (ventana), 409 (sin caja).
+ * @param input Entrada validada de la anulación (solo se usa el id de la venta; el motivo y el usuario los persiste el repositorio).
+ * @param venta Venta leída de la BD, o `null` si no existe.
+ * @param ahora Instante actual del servidor.
+ * @param hayCajaAbierta Si existe al menos una sesión de caja abierta (cualquiera).
+ * @returns El estado anterior, el límite de la ventana y el instante de la anulación, para que el repositorio
+ * condicione la transición y registre la auditoría con ese mismo instante.
+ * @throws {ErrorNegocio} Venta inexistente (404), ya anulada (409), ventana vencida (403) o
+ * venta con cobro sin caja abierta (409). Se lanza como objeto puro, no como Error.
+ */
+export function evaluarAnulacion(
+  input: AnularVentaInput,
+  venta: VentaAnulable | null,
+  ahora: Date,
+  hayCajaAbierta: boolean,
+): DecisionAnulacion {
+  if (venta === null) {
+    throw crearErrorNegocio(`La venta ${input.idVenta} no existe`, 404);
+  }
+  // Narrowing: tras descartar ANULADA, el estado leído es uno de los anulables
+  if (venta.estado === "ANULADA") {
+    throw crearErrorVentaYaAnulada(venta.idVenta);
+  }
+
+  // La ventana corre desde el pago si lo hay (un fiado cobrado vuelve a tener 15 min) y si no, desde la venta
+  const limiteVentana = calcularLimiteVentana(ahora);
+  const fechaReferencia = venta.fechaHoraPago ?? venta.fechaHora;
+  if (fechaReferencia < limiteVentana) {
+    throw crearErrorVentanaAnulacionVencida(LIMITE_MINUTOS_ANULACION);
+  }
+
+  // Solo una venta con cobro (COMPLETADA) revierte caja y por eso exige una caja abierta; el fiado pendiente solo repone stock
+  if (venta.estado === "COMPLETADA" && !hayCajaAbierta) {
+    throw crearErrorSinCajaParaAnular();
+  }
+
+  // El mismo `ahora` fija el límite de la ventana y el instante de la anulación: un único reloj por operación
+  return {
+    numeroComprobante: venta.numeroComprobante,
+    estadoAnterior: venta.estado,
+    limiteVentana,
+    fechaHoraAnulacion: ahora,
+  };
+}
+
+// --- ANULACIÓN DE VENTA: RESPUESTA ---
+
+/** Convierte la anulación persistida al formato de la respuesta: la venta queda siempre ANULADA. */
+function convertirAnulacionPersistida(anulacion: AnulacionPersistida): AnularVentaResponse["venta"] {
+  return {
+    idVenta: anulacion.idVenta,
+    numeroComprobante: anulacion.numeroComprobante,
+    estado: "ANULADA",
+    estadoAnterior: anulacion.estadoAnterior,
+    anulacion: { fechaHora: anulacion.fechaHoraAnulacion.toISOString(), motivo: anulacion.motivo },
   };
 }
