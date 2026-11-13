@@ -1,6 +1,11 @@
 import { z } from "zod";
 import { iniciarSesionSchema } from "../modules/auth/auth.schemas.js";
-import { CANTIDAD_MAXIMA, registrarCambioSchema } from "../modules/cambios-mercaderia/cambios-mercaderia.schemas.js";
+import {
+  CANTIDAD_MAXIMA,
+  consultarHistorialCambiosSchema,
+  ID_MEDIO_PAGO_MAXIMO,
+  registrarCambioSchema,
+} from "../modules/cambios-mercaderia/cambios-mercaderia.schemas.js";
 import { consultarProductosSchema, BUSQUEDA_LONGITUD_MAXIMA } from "../modules/inventario/inventario.schemas.js";
 import {
   CANTIDAD_POR_PAGINA_MAXIMA,
@@ -615,6 +620,121 @@ const cambioRegistrado = {
   required: ["exito", "mensaje", "cambio"],
 };
 
+// --- HISTORIAL DE CAMBIOS ---
+
+/** Respuesta exitosa de `GET /api/cambios-mercaderia` (ver `ConsultarHistorialCambiosResponse`). */
+const historialCambiosConsultado = {
+  type: "object",
+  properties: {
+    exito: { type: "boolean", example: true },
+    fechaHoraServidor: {
+      type: "string",
+      format: "date-time",
+      description:
+        "Hora del servidor al responder. Se compara con `fechaHoraLimiteModificacion` de cada fila para saber si la ventana de 15 minutos sigue abierta",
+    },
+    cambios: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          idCambio: { type: "integer", example: 7 },
+          fechaHora: { type: "string", format: "date-time" },
+          estado: { type: "string", enum: ["ACTIVO", "ANULADO"] },
+          fechaHoraLimiteModificacion: {
+            type: "string",
+            format: "date-time",
+            nullable: true,
+            description: "`fechaHora` más los minutos de la ventana de anulación. Nulo si el cambio está ANULADO",
+          },
+          idVentaOriginal: { type: "integer", nullable: true, example: 42, description: "Nulo si el cambio no está vinculado a un ticket" },
+          numeroComprobanteVentaOriginal: {
+            type: "string",
+            nullable: true,
+            example: "CMP-00000042",
+            description: "Nulo sin venta original o si la venta es anterior al backfill del comprobante",
+          },
+          idProductoDevuelto: { type: "integer", example: 1 },
+          nombreProductoDevuelto: { type: "string", example: "Alimento balanceado perro adulto 15 kg", description: "Nombre vigente" },
+          formatoVentaProductoDevuelto: { type: "string", enum: ["UNIDAD", "GRANEL"] },
+          cantidadDevuelta: { type: "string", example: "1.000", description: "Texto con 3 decimales" },
+          esBolsaAbierta: { type: "boolean", example: false },
+          cantidadStockIngresado: {
+            type: "string",
+            nullable: true,
+            example: "15.000",
+            description: "Kilos que ingresaron al granel. Solo con `esBolsaAbierta`; nulo en caso contrario. Texto con 3 decimales",
+          },
+          idProductoEntregado: { type: "integer", example: 2 },
+          nombreProductoEntregado: { type: "string", example: "Alimento balanceado perro adulto 20 kg", description: "Nombre vigente" },
+          formatoVentaProductoEntregado: { type: "string", enum: ["UNIDAD", "GRANEL"] },
+          cantidadEntregada: { type: "string", example: "1.000", description: "Texto con 3 decimales" },
+          saldoResultante: { type: "string", example: "500.00", description: "Texto con 2 decimales" },
+          idMedioPago: { type: "integer", nullable: true, example: 1, description: "Nulo si el saldo es 0" },
+          nombreMedioPago: { type: "string", nullable: true, example: "Efectivo", description: "Nombre vigente; nulo si el saldo es 0" },
+        },
+        required: [
+          "idCambio",
+          "fechaHora",
+          "estado",
+          "fechaHoraLimiteModificacion",
+          "idVentaOriginal",
+          "numeroComprobanteVentaOriginal",
+          "idProductoDevuelto",
+          "nombreProductoDevuelto",
+          "formatoVentaProductoDevuelto",
+          "cantidadDevuelta",
+          "esBolsaAbierta",
+          "cantidadStockIngresado",
+          "idProductoEntregado",
+          "nombreProductoEntregado",
+          "formatoVentaProductoEntregado",
+          "cantidadEntregada",
+          "saldoResultante",
+          "idMedioPago",
+          "nombreMedioPago",
+        ],
+      },
+    },
+    paginacion: {
+      type: "object",
+      properties: {
+        pagina: { type: "integer", example: 1 },
+        cantidadPorPagina: { type: "integer", example: 20 },
+        totalRegistros: { type: "integer", example: 10 },
+        totalPaginas: { type: "integer", example: 1 },
+      },
+      required: ["pagina", "cantidadPorPagina", "totalRegistros", "totalPaginas"],
+    },
+  },
+  required: ["exito", "fechaHoraServidor", "cambios", "paginacion"],
+};
+
+/** Descripción de cada parámetro de la consulta del historial de cambios (los rangos salen de las mismas constantes del esquema). */
+const descripcionesParametrosHistorialCambios: Record<string, string> = {
+  pagina: `Número de página, entero entre 1 y ${PAGINA_MAXIMA}. Por defecto 1.`,
+  cantidadPorPagina: `Filas por página, entero entre 1 y ${CANTIDAD_POR_PAGINA_MAXIMA}. Por defecto ${CANTIDAD_POR_PAGINA_PREDETERMINADA}.`,
+  fechaDesde:
+    "Día inicial inclusivo (AAAA-MM-DD), interpretado en hora de Argentina (UTC-3): desde las 00:00 de ese día.",
+  fechaHasta:
+    "Día final inclusivo (AAAA-MM-DD), interpretado en hora de Argentina (UTC-3): hasta las 23:59:59 de ese día. No puede ser anterior a fechaDesde.",
+  idProducto: `Entero positivo (máximo ${ID_PRODUCTO_MAXIMO}). Cambios cuyo producto devuelto o entregado es este.`,
+  estado: "Solo cambios en este estado. Sin este filtro se devuelven todos, incluidos los anulados.",
+  vinculo:
+    "`VINCULADO`: solo cambios con venta original. `DESVINCULADO`: solo cambios sin ella. Sin este filtro se devuelven ambos.",
+  idMedioPago: `Entero positivo (máximo ${ID_MEDIO_PAGO_MAXIMO}). Cambios cuyo saldo se cobró con este medio; los de saldo 0 no tienen medio y no coinciden.`,
+};
+
+// Los parámetros se derivan del esquema Zod real (io "input" = lo que envía el cliente), así no se desactualizan
+const esquemaConsultaHistorialCambios = z.toJSONSchema(consultarHistorialCambiosSchema, { io: "input", target: "draft-7" });
+const parametrosHistorialCambios = Object.entries(esquemaConsultaHistorialCambios.properties ?? {}).map(([nombre, esquema]) => ({
+  name: nombre,
+  in: "query",
+  required: false,
+  description: descripcionesParametrosHistorialCambios[nombre],
+  schema: esquema,
+}));
+
 // --- PARÁMETRO DE RUTA DE LA CONSULTA DE UNA VENTA ---
 
 // El parámetro se deriva del esquema Zod real, igual que los del historial, para que no se desactualice
@@ -1095,6 +1215,31 @@ export const openapiDocument = {
       },
     },
     "/api/cambios-mercaderia": {
+      get: {
+        tags: ["Ventas"],
+        security: [{ bearerAuth: [] }],
+        summary: "Consultar el historial de cambios de mercadería (paginado, con filtros)",
+        description:
+          "Alimenta la grilla del historial de cambios. Orden fijo: fecha descendente con desempate por id descendente. " +
+          "Los filtros son opcionales y se combinan con AND. Una página fuera de rango devuelve 200 con lista vacía. " +
+          "Los nombres de producto y de medio de pago son los vigentes. No incluye precios unitarios ni costos. " +
+          "`fechaHoraLimiteModificacion` es la fecha del cambio más la ventana de anulación (15 minutos) y es nulo en los anulados; " +
+          "la raíz trae `fechaHoraServidor` para evaluar esa ventana con la hora del servidor. " +
+          "`cantidadStockIngresado` solo se informa en una bolsa abierta (kilos que ingresaron al granel). " +
+          "Requiere sesión (roles VENDEDOR, GESTOR_COMERCIAL o GERENTE); no exige caja abierta.",
+        parameters: parametrosHistorialCambios,
+        responses: {
+          "200": {
+            description: "Página del historial de cambios con sus metadatos de paginación",
+            content: { "application/json": { schema: historialCambiosConsultado } },
+          },
+          "400": {
+            description: "Parámetros de consulta inválidos (formato, rango, fecha inexistente o rango de fechas invertido)",
+            content: { "application/json": { schema: errorValidacionConsulta } },
+          },
+          ...respuestasProteccion,
+        },
+      },
       post: {
         tags: ["Ventas"],
         security: [{ bearerAuth: [] }],
