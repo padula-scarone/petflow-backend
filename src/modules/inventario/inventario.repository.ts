@@ -21,13 +21,16 @@ export async function buscarProductosActivos(busqueda: string | undefined): Prom
       // Sin condición de nombre cuando no hay búsqueda: se devuelve todo el catálogo activo
       ...(busqueda !== undefined && { nombre: { contains: busqueda, mode: "insensitive" } }),
     },
-    // Select explícito: payload liviano y sin exponer costo, categoría ni código de barras
+    // Select explícito: payload liviano y sin exponer costo, categoría ni código de barras.
+    // El peso y el granel asociado no salen en la respuesta: solo deciden `permiteBolsaAbierta`
     select: {
       idProducto: true,
       nombre: true,
       precioVenta: true,
       stockFisico: true,
       formatoVenta: true,
+      pesoUnitario: true,
+      productoGranel: { select: { formatoVenta: true, estado: true } },
     },
     // El id desempata para que el orden sea estable entre consultas
     orderBy: [{ nombre: "asc" }, { idProducto: "asc" }],
