@@ -1,8 +1,8 @@
 import type { Request, Response } from "express";
 import type { SesionAutenticada } from "../auth/auth.types.js";
 import { esErrorNegocio } from "../ventas/ventas.errors.js";
-import { registrarCambioSchema } from "./cambios-mercaderia.schemas.js";
-import { registrarCambio } from "./cambios-mercaderia.service.js";
+import { consultarHistorialCambiosSchema, registrarCambioSchema } from "./cambios-mercaderia.schemas.js";
+import { consultarHistorialCambios, registrarCambio } from "./cambios-mercaderia.service.js";
 
 // --- FUNCIONES AUXILIARES ---
 
@@ -57,6 +57,33 @@ export async function postRegistrarCambio(req: Request, res: Response): Promise<
   } catch (errorCapturado) {
     // Los errores de negocio (objetos puros) se traducen a su código HTTP;
     // cualquier otro valor (BD caída, bug) no pasa la guarda y sube a Express
+    if (esErrorNegocio(errorCapturado)) {
+      res.status(errorCapturado.status).json({ exito: false, mensaje: errorCapturado.mensaje });
+      return;
+    }
+    throw errorCapturado;
+  }
+}
+
+/**
+ * Handler de `GET /api/cambios-mercaderia`: lista paginada del historial de cambios con filtros opcionales.
+ * Valida la query y delega en el service. No contiene reglas de negocio ni exige caja abierta.
+ * La sesión validada (cualquier rol) la exige `requerirRol` en la ruta, no este handler.
+ * Respuestas: 200 con la página (vacía si está fuera de rango); 400 con detalle por parámetro si la query es inválida.
+ */
+export async function getConsultarHistorialCambios(req: Request, res: Response): Promise<void> {
+  // Los query params llegan siempre como texto: el esquema los convierte de forma estricta
+  const parseo = consultarHistorialCambiosSchema.safeParse(req.query);
+  if (!parseo.success) {
+    res.status(400).json(construirRespuestaValidacion("Parámetros de consulta inválidos", parseo.error.issues));
+    return;
+  }
+
+  try {
+    const resultado = await consultarHistorialCambios(parseo.data);
+    res.status(200).json(resultado);
+  } catch (errorCapturado) {
+    // Igual que en el alta: los errores de negocio se traducen y cualquier otro valor sube a Express
     if (esErrorNegocio(errorCapturado)) {
       res.status(errorCapturado.status).json({ exito: false, mensaje: errorCapturado.mensaje });
       return;

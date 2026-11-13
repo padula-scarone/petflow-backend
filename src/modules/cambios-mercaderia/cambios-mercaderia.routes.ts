@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { requerirRol } from "../auth/auth.middleware.js";
-import { postRegistrarCambio } from "./cambios-mercaderia.controller.js";
+import { getConsultarHistorialCambios, postRegistrarCambio } from "./cambios-mercaderia.controller.js";
 
 // --- RUTAS ---
 
@@ -9,3 +9,6 @@ export const cambiosMercaderiaRouter = Router();
 
 // POST /api/cambios-mercaderia: registrar un cambio posventa (con o sin ticket vinculado). Requiere sesión validada y caja abierta (CUB 1.4)
 cambiosMercaderiaRouter.post("/", requerirRol("VENDEDOR", "GESTOR_COMERCIAL", "GERENTE"), postRegistrarCambio);
+
+// GET /api/cambios-mercaderia: historial paginado con filtros (fecha, producto, estado, vínculo, medio de pago). Requiere sesión validada; no exige caja abierta
+cambiosMercaderiaRouter.get("/", requerirRol("VENDEDOR", "GESTOR_COMERCIAL", "GERENTE"), getConsultarHistorialCambios);

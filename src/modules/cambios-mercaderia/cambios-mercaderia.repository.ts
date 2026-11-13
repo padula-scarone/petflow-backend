@@ -1,11 +1,14 @@
+import type { Prisma } from "../../generated/prisma/client.js";
 import { prisma } from "../../shared/prisma.js";
 import { crearErrorStockInsuficiente } from "../ventas/ventas.errors.js";
 import { crearErrorSinCajaParaCambio } from "./cambios-mercaderia.errors.js";
 import type {
   CambioCalculado,
   CambioPersistido,
+  FiltroHistorialCambios,
   LecturaCambio,
   MedioPagoParaCambio,
+  PaginaHistorialCambios,
   ProductoParaCambio,
   RegistrarCambioInput,
   VentaOriginalLeida,
@@ -246,6 +249,113 @@ async function leerMedioPago(transaccion: ClienteTransaccion, idMedioPago: numbe
   return medio === null ? null : { idMedioPago: medio.idMedioPago, activo: medio.estado === "ACTIVO" };
 }
 
+// --- CONSULTA DE HISTORIAL ---
+
+/**
+ * Traduce el filtro del historial a la condición de Prisma.
+ * Cada filtro presente suma una condición y todas se combinan con AND (son claves del mismo objeto).
+ * Se arma con propiedades condicionales porque el tsconfig no admite asignar `undefined` a una propiedad opcional.
+ */
+function construirCondicionHistorial(filtro: FiltroHistorialCambios): Prisma.CambioMercaderiaWhereInput {
+  const hayFiltroDeFecha = filtro.fechaDesdeInclusiva !== undefined || filtro.fechaHastaExclusiva !== undefined;
+
+  return {
+    ...(hayFiltroDeFecha
+      ? {
+          fechaHora: {
+            ...(filtro.fechaDesdeInclusiva !== undefined ? { gte: filtro.fechaDesdeInclusiva } : {}),
+            ...(filtro.fechaHastaExclusiva !== undefined ? { lt: filtro.fechaHastaExclusiva } : {}),
+          },
+        }
+      : {}),
+    ...(filtro.estado !== undefined ? { estado: filtro.estado } : {}),
+    // El producto puede ser el devuelto o el entregado. No se mira el producto que recibió el stock (el granel de una bolsa abierta)
+    ...(filtro.idProducto !== undefined
+      ? { OR: [{ idProductoDevuelto: filtro.idProducto }, { idProductoEntregado: filtro.idProducto }] }
+      : {}),
+    // Con venta original = `idVentaOriginal` no nulo; sin ella, nulo
+    ...(filtro.vinculo !== undefined
+      ? { idVentaOriginal: filtro.vinculo === "VINCULADO" ? { not: null } : null }
+      : {}),
+    ...(filtro.idMedioPago !== undefined ? { idMedioPago: filtro.idMedioPago } : {}),
+  };
+}
+
+/**
+ * Busca una página del historial de cambios y el total de registros que cumplen el filtro.
+ * Es solo lectura. Orden fijo: fecha descendente con desempate por id descendente; sin desempate
+ * la paginación podría repetir o saltarse filas que comparten la misma fecha.
+ * Los nombres de producto y de medio de pago son los vigentes: no se congelan en el cambio.
+ * @param filtro Filtros ya traducidos (fechas como instantes).
+ * @param desplazamiento Cantidad de filas a saltar.
+ * @param cantidadPorPagina Cantidad máxima de filas a devolver.
+ */
+export async function buscarHistorialCambios(
+  filtro: FiltroHistorialCambios,
+  desplazamiento: number,
+  cantidadPorPagina: number,
+): Promise<PaginaHistorialCambios> {
+  // El mismo where en las filas y en el conteo, para que el total sea coherente con la lista
+  const condicion = construirCondicionHistorial(filtro);
+
+  // RepeatableRead: ambas consultas ven la misma foto de la BD aunque entre un cambio nuevo a mitad de camino
+  const [filas, totalRegistros] = await prisma.$transaction(
+    [
+      prisma.cambioMercaderia.findMany({
+        where: condicion,
+        orderBy: [{ fechaHora: "desc" }, { idCambio: "desc" }],
+        skip: desplazamiento,
+        take: cantidadPorPagina,
+        // Solo las columnas de la grilla: sin precios unitarios ni costos congelados
+        select: {
+          idCambio: true,
+          fechaHora: true,
+          estado: true,
+          idVentaOriginal: true,
+          ventaOriginal: { select: { numeroComprobante: true } },
+          idProductoDevuelto: true,
+          productoDevuelto: { select: { nombre: true, formatoVenta: true } },
+          cantidadDevuelta: true,
+          esBolsaAbierta: true,
+          cantidadStockIngresado: true,
+          idProductoEntregado: true,
+          productoEntregado: { select: { nombre: true, formatoVenta: true } },
+          cantidadEntregada: true,
+          saldoResultante: true,
+          idMedioPago: true,
+          medioPago: { select: { nombre: true } },
+        },
+      }),
+      prisma.cambioMercaderia.count({ where: condicion }),
+    ],
+    { isolationLevel: "RepeatableRead" },
+  );
+
+  return {
+    filas: filas.map((fila) => ({
+      idCambio: fila.idCambio,
+      fechaHora: fila.fechaHora,
+      estado: fila.estado,
+      idVentaOriginal: fila.idVentaOriginal,
+      numeroComprobanteVentaOriginal: fila.ventaOriginal?.numeroComprobante ?? null,
+      idProductoDevuelto: fila.idProductoDevuelto,
+      nombreProductoDevuelto: fila.productoDevuelto.nombre,
+      formatoVentaProductoDevuelto: fila.productoDevuelto.formatoVenta,
+      cantidadDevueltaMilesimas: aMilesimas(fila.cantidadDevuelta),
+      esBolsaAbierta: fila.esBolsaAbierta,
+      cantidadStockIngresadoMilesimas: aMilesimasOpcional(fila.cantidadStockIngresado),
+      idProductoEntregado: fila.idProductoEntregado,
+      nombreProductoEntregado: fila.productoEntregado.nombre,
+      formatoVentaProductoEntregado: fila.productoEntregado.formatoVenta,
+      cantidadEntregadaMilesimas: aMilesimas(fila.cantidadEntregada),
+      saldoResultanteCentavos: aCentavos(fila.saldoResultante),
+      idMedioPago: fila.idMedioPago,
+      nombreMedioPago: fila.medioPago?.nombre ?? null,
+    })),
+    totalRegistros,
+  };
+}
+
 // --- UTILIDADES ---
 // Copias locales de las de ventas, que no se exportan: se evita tocar ese módulo. Su extracción a `shared` es deuda registrada.
 
@@ -258,6 +368,11 @@ function aCentavos(valor: { toNumber(): number }): number {
 /** Cantidad (decimal de BD) a milésimas enteras. */
 function aMilesimas(valor: { toNumber(): number }): number {
   return Math.round(valor.toNumber() * 1000);
+}
+
+/** Igual que `aMilesimas`, pero conserva `null` por si una columna decimal llegara sin valor. */
+function aMilesimasOpcional(valor: { toNumber(): number } | null): number | null {
+  return valor === null ? null : aMilesimas(valor);
 }
 
 // Conversiones desde enteros internos a strings para columnas Decimal
