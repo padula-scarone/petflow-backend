@@ -214,7 +214,7 @@ export function descomponerFechaCalendario(
  * Entero recibido como texto dentro de un rango.
  * Se usa regex + transform y no `z.coerce`: coerce acepta en silencio "1e1", " 2 " o ["1"].
  */
-function enteroDesdeTexto(minimo: number, maximo: number) {
+export function enteroDesdeTexto(minimo: number, maximo: number) {
   return z
     .string()
     .regex(/^\d+$/, "Debe ser un entero sin signo, sin espacios ni notación científica")
@@ -223,7 +223,7 @@ function enteroDesdeTexto(minimo: number, maximo: number) {
 }
 
 /** Fecha `AAAA-MM-DD` que además existe en el calendario. */
-const fechaCalendarioSchema = z
+export const fechaCalendarioSchema = z
   .string()
   .regex(/^\d{4}-\d{2}-\d{2}$/, "Debe tener formato AAAA-MM-DD")
   .refine((fecha) => descomponerFechaCalendario(fecha) !== null, "La fecha no existe en el calendario");

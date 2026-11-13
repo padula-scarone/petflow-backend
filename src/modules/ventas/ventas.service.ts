@@ -355,7 +355,7 @@ export function calcularFiltroHistorial(consulta: ConsultarHistorialInput): Filt
  * @param diasAdicionales Días a sumar al día indicado (0 = el mismo día, 1 = el siguiente).
  * @example calcularInicioDiaArgentina("2026-10-30", 0) // 2026-10-30T03:00:00.000Z
  */
-function calcularInicioDiaArgentina(fecha: string, diasAdicionales: number): Date {
+export function calcularInicioDiaArgentina(fecha: string, diasAdicionales: number): Date {
   const partes = descomponerFechaCalendario(fecha);
   if (partes === null) {
     throw crearErrorNegocio(`La fecha ${fecha} no existe en el calendario`, 400);
