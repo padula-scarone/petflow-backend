@@ -151,7 +151,10 @@ model Producto {
   costoActual      Decimal        @map("costo_actual") @db.Decimal(10, 2)
   precioVenta      Decimal        @map("precio_venta") @db.Decimal(10, 2)
   stockFisico      Decimal        @default(0.000) @map("stock_fisico") @db.Decimal(10, 3)
+  // Producto GRANEL al que se suma el contenido de una bolsa abierta devuelta; solo lo tienen los productos UNIDAD
   idProductoGranel Int?           @map("id_producto_granel")
+  // Kilos que pesa una unidad (una bolsa). Nulo si no aplica o no está cargado; sin peso no se admite bolsa abierta
+  pesoUnitario     Decimal?       @map("peso_unitario") @db.Decimal(10, 3)
   estado           EstadoRegistro @default(ACTIVO)
 
   categoria             Categoria          @relation(fields: [idCategoria], references: [idCategoria])
@@ -265,10 +268,16 @@ model CambioMercaderia {
 
   // Artículo que entra (devuelto por el cliente)
   idProductoDevuelto              Int          @map("id_producto_devuelto")
+  // Unidades devueltas (enteras si el producto es UNIDAD)
   cantidadDevuelta                Decimal      @map("cantidad_devuelta") @db.Decimal(10, 3)
+  // Bolsa abierta: el contenido se suma al granel del producto devuelto en vez de reponer la unidad
   esBolsaAbierta                  Boolean      @default(false) @map("es_bolsa_abierta")
   precioUnitarioDevuelto          Decimal      @map("precio_unitario_devuelto") @db.Decimal(10, 2)
+  // Producto cuyo stock recibe el ingreso: el mismo devuelto, o su granel si es bolsa abierta
   idProductoStockIngresado        Int          @map("id_producto_stock_ingresado")
+  // Lo que entró al stock: unidades del producto ingresado, o kilos si ingresó a granel (bolsa abierta).
+  // Se guarda para revertir con exactitud aunque después cambie el peso del producto
+  cantidadStockIngresado          Decimal      @map("cantidad_stock_ingresado") @db.Decimal(10, 3)
 
   // Artículo que sale (entregado al cliente)
   idProductoEntregado             Int          @map("id_producto_entregado")
