@@ -1,6 +1,12 @@
 import type { z } from "zod";
 import type { FormatoVenta, ProductoGranelAsociado } from "../inventario/inventario.types.js";
-import type { registrarCambioSchema } from "./cambios-mercaderia.schemas.js";
+import type { PaginacionHistorial } from "../ventas/ventas.types.js";
+import type {
+  consultarHistorialCambiosSchema,
+  ESTADOS_CAMBIO_HISTORIAL,
+  registrarCambioSchema,
+  VINCULOS_CAMBIO_HISTORIAL,
+} from "./cambios-mercaderia.schemas.js";
 
 // --- TIPOS DE ENTRADA ---
 
@@ -131,4 +137,107 @@ export type RegistrarCambioResponse = {
     saldoResultante: string;
     idMedioPago: number | null;
   };
+};
+
+// --- HISTORIAL DE CAMBIOS: ENTRADA Y FILTRO ---
+
+/** Query validada de `GET /api/cambios-mercaderia`, inferida del esquema Zod (ya con valores por defecto aplicados). */
+export type ConsultarHistorialCambiosInput = z.infer<typeof consultarHistorialCambiosSchema>;
+
+/** Estados consultables en el historial de cambios. */
+export type EstadoCambioHistorial = (typeof ESTADOS_CAMBIO_HISTORIAL)[number];
+
+/** Vínculos filtrables: con venta original (`VINCULADO`) o sin ella (`DESVINCULADO`). */
+export type VinculoCambioHistorial = (typeof VINCULOS_CAMBIO_HISTORIAL)[number];
+
+/** Filtros del historial ya traducidos a valores listos para consultar. Todos se combinan con AND. */
+export type FiltroHistorialCambios = {
+  /** Límite inferior inclusivo: 00:00 (hora de Argentina) del día `fechaDesde`. */
+  fechaDesdeInclusiva?: Date;
+  /** Límite superior exclusivo: 00:00 (hora de Argentina) del día siguiente a `fechaHasta`. */
+  fechaHastaExclusiva?: Date;
+  /** Solo cambios cuyo producto devuelto o entregado es este. */
+  idProducto?: number;
+  estado?: EstadoCambioHistorial;
+  vinculo?: VinculoCambioHistorial;
+  /** Solo cambios cuyo saldo se cobró con este medio; los de saldo 0 (sin medio) nunca coinciden. */
+  idMedioPago?: number;
+};
+
+// --- HISTORIAL DE CAMBIOS: DATOS DE LA BASE ---
+// Cantidades en milésimas y saldo en centavos (enteros), como el resto del módulo.
+
+/** Fila del historial tal como la entrega el repositorio: solo las columnas de la grilla. */
+export type FilaHistorialCambio = {
+  idCambio: number;
+  fechaHora: Date;
+  estado: EstadoCambioHistorial;
+  idVentaOriginal: number | null;
+  /** Nulo sin venta original, o si la venta es anterior al backfill del comprobante. */
+  numeroComprobanteVentaOriginal: string | null;
+  idProductoDevuelto: number;
+  /** Nombre vigente del producto (no se congela en el cambio). */
+  nombreProductoDevuelto: string;
+  formatoVentaProductoDevuelto: FormatoVenta;
+  cantidadDevueltaMilesimas: number;
+  esBolsaAbierta: boolean;
+  /**
+   * Lo que entró al stock, en milésimas: unidades si no es bolsa abierta (el alta guarda la cantidad devuelta) o kilos si lo es.
+   * Se tipa con nulo por defensa: la columna es NOT NULL, así que hoy el repositorio siempre entrega un número.
+   */
+  cantidadStockIngresadoMilesimas: number | null;
+  idProductoEntregado: number;
+  nombreProductoEntregado: string;
+  formatoVentaProductoEntregado: FormatoVenta;
+  cantidadEntregadaMilesimas: number;
+  saldoResultanteCentavos: number;
+  idMedioPago: number | null;
+  /** Nombre vigente del medio de pago; nulo si el cambio no tuvo saldo. */
+  nombreMedioPago: string | null;
+};
+
+/** Una página de filas más el total de registros que cumplen el filtro (sin paginar). */
+export type PaginaHistorialCambios = {
+  filas: FilaHistorialCambio[];
+  totalRegistros: number;
+};
+
+// --- HISTORIAL DE CAMBIOS: RESPUESTA HTTP ---
+
+/** Fila de la grilla de historial en la respuesta. Cantidades como texto con 3 decimales y saldo con 2. */
+export type CambioHistorial = {
+  idCambio: number;
+  /** Fecha y hora en formato ISO 8601. */
+  fechaHora: string;
+  estado: EstadoCambioHistorial;
+  /**
+   * Hasta cuándo se puede anular o editar (ISO 8601): `fechaHora` más `LIMITE_MINUTOS_ANULACION`.
+   * Nulo si el cambio está anulado: ya no tiene ventana.
+   */
+  fechaHoraLimiteModificacion: string | null;
+  idVentaOriginal: number | null;
+  numeroComprobanteVentaOriginal: string | null;
+  idProductoDevuelto: number;
+  nombreProductoDevuelto: string;
+  formatoVentaProductoDevuelto: FormatoVenta;
+  cantidadDevuelta: string;
+  esBolsaAbierta: boolean;
+  /** Kilos que ingresaron al granel si es bolsa abierta; nulo en caso contrario. */
+  cantidadStockIngresado: string | null;
+  idProductoEntregado: number;
+  nombreProductoEntregado: string;
+  formatoVentaProductoEntregado: FormatoVenta;
+  cantidadEntregada: string;
+  saldoResultante: string;
+  idMedioPago: number | null;
+  nombreMedioPago: string | null;
+};
+
+/** Respuesta exitosa de `GET /api/cambios-mercaderia`. Una página fuera de rango devuelve `cambios` vacío. */
+export type ConsultarHistorialCambiosResponse = {
+  exito: true;
+  /** Hora del servidor al responder (ISO 8601): el front la compara con `fechaHoraLimiteModificacion`. */
+  fechaHoraServidor: string;
+  cambios: CambioHistorial[];
+  paginacion: PaginacionHistorial;
 };

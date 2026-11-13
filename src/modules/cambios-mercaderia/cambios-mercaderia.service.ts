@@ -1,6 +1,12 @@
 import { evaluarBolsaAbierta } from "../inventario/inventario.service.js";
 import { crearErrorNegocio } from "../ventas/ventas.errors.js";
 import {
+  calcularDesplazamiento,
+  calcularInicioDiaArgentina,
+  calcularTotalPaginas,
+  LIMITE_MINUTOS_ANULACION,
+} from "../ventas/ventas.service.js";
+import {
   crearErrorBolsaAbiertaNoPermitida,
   crearErrorCantidadExcedeVenta,
   crearErrorMedioPagoRequerido,
@@ -10,10 +16,16 @@ import {
   crearErrorVentaOriginalAnulada,
   crearErrorVentaOriginalPendientePago,
 } from "./cambios-mercaderia.errors.js";
-import { registrarCambioAtomico } from "./cambios-mercaderia.repository.js";
+import { buscarHistorialCambios, registrarCambioAtomico } from "./cambios-mercaderia.repository.js";
 import type {
   CambioCalculado,
+  CambioHistorial,
   CambioPersistido,
+  ConsultarHistorialCambiosInput,
+  ConsultarHistorialCambiosResponse,
+  EstadoCambioHistorial,
+  FilaHistorialCambio,
+  FiltroHistorialCambios,
   LecturaCambio,
   ProductoParaCambio,
   RegistrarCambioInput,
@@ -28,6 +40,9 @@ const MAXIMO_MILESIMAS_COLUMNA = 9_999_999_999;
 
 /** Máximo de una columna decimal(10,2) expresado en centavos: 99.999.999,99. */
 const MAXIMO_CENTAVOS_COLUMNA = 9_999_999_999;
+
+/** Milisegundos que dura un minuto, para convertir la ventana de modificación a un instante. */
+const MILISEGUNDOS_POR_MINUTO = 60_000;
 
 // --- ORQUESTACIÓN ---
 
@@ -290,6 +305,101 @@ function convertirCambioPersistido(cambio: CambioPersistido): RegistrarCambioRes
     precioUnitarioEntregado: formatearCentavos(cambio.precioUnitarioEntregadoCentavos),
     saldoResultante: formatearCentavos(cambio.saldoCentavos),
     idMedioPago: cambio.idMedioPago,
+  };
+}
+
+// --- CONSULTA DE HISTORIAL ---
+
+/**
+ * Consulta una página del historial de cambios con sus filtros.
+ * @param consulta Query ya validada por Zod (con valores por defecto aplicados).
+ * @returns Los cambios de la página, los metadatos de paginación y la hora del servidor. Una página fuera de rango devuelve lista vacía.
+ */
+export async function consultarHistorialCambios(
+  consulta: ConsultarHistorialCambiosInput,
+): Promise<ConsultarHistorialCambiosResponse> {
+  const filtro = calcularFiltroHistorialCambios(consulta);
+  const desplazamiento = calcularDesplazamiento(consulta.pagina, consulta.cantidadPorPagina);
+
+  const paginaEncontrada = await buscarHistorialCambios(filtro, desplazamiento, consulta.cantidadPorPagina);
+
+  return {
+    exito: true,
+    // El reloj se toma recién después de leer: es lo más cercano al momento en que el front recibe la respuesta
+    fechaHoraServidor: new Date().toISOString(),
+    cambios: paginaEncontrada.filas.map(convertirFilaHistorialCambio),
+    paginacion: {
+      pagina: consulta.pagina,
+      cantidadPorPagina: consulta.cantidadPorPagina,
+      totalRegistros: paginaEncontrada.totalRegistros,
+      totalPaginas: calcularTotalPaginas(paginaEncontrada.totalRegistros, consulta.cantidadPorPagina),
+    },
+  };
+}
+
+// --- CÁLCULO PURO DEL HISTORIAL ---
+
+/**
+ * Traduce los filtros de la query a los valores que consulta el repositorio.
+ * Solo se incluyen los filtros presentes.
+ * @throws {ErrorNegocio} Si una fecha no existe en el calendario (el esquema Zod ya lo impide; es una defensa).
+ */
+export function calcularFiltroHistorialCambios(consulta: ConsultarHistorialCambiosInput): FiltroHistorialCambios {
+  return {
+    // Desde: 00:00 (hora argentina) del día indicado, inclusivo
+    ...(consulta.fechaDesde !== undefined
+      ? { fechaDesdeInclusiva: calcularInicioDiaArgentina(consulta.fechaDesde, 0) }
+      : {}),
+    // Hasta: el día indicado debe quedar incluido completo, así que el límite es 00:00 del día siguiente, exclusivo
+    ...(consulta.fechaHasta !== undefined
+      ? { fechaHastaExclusiva: calcularInicioDiaArgentina(consulta.fechaHasta, 1) }
+      : {}),
+    ...(consulta.idProducto !== undefined ? { idProducto: consulta.idProducto } : {}),
+    ...(consulta.estado !== undefined ? { estado: consulta.estado } : {}),
+    ...(consulta.vinculo !== undefined ? { vinculo: consulta.vinculo } : {}),
+    ...(consulta.idMedioPago !== undefined ? { idMedioPago: consulta.idMedioPago } : {}),
+  };
+}
+
+/**
+ * Calcula hasta cuándo se puede anular o editar un cambio: su fecha y hora más la ventana de anulación de ventas.
+ * @returns El instante límite, o `null` si el cambio está anulado (ya no tiene ventana).
+ */
+export function calcularLimiteModificacionCambio(fechaHora: Date, estado: EstadoCambioHistorial): Date | null {
+  if (estado === "ANULADO") {
+    return null;
+  }
+  return new Date(fechaHora.getTime() + LIMITE_MINUTOS_ANULACION * MILISEGUNDOS_POR_MINUTO);
+}
+
+/** Convierte una fila del repositorio al formato de la respuesta (fechas ISO, cantidades con 3 decimales y saldo con 2). */
+function convertirFilaHistorialCambio(fila: FilaHistorialCambio): CambioHistorial {
+  const limiteModificacion = calcularLimiteModificacionCambio(fila.fechaHora, fila.estado);
+
+  return {
+    idCambio: fila.idCambio,
+    fechaHora: fila.fechaHora.toISOString(),
+    estado: fila.estado,
+    fechaHoraLimiteModificacion: limiteModificacion === null ? null : limiteModificacion.toISOString(),
+    idVentaOriginal: fila.idVentaOriginal,
+    numeroComprobanteVentaOriginal: fila.numeroComprobanteVentaOriginal,
+    idProductoDevuelto: fila.idProductoDevuelto,
+    nombreProductoDevuelto: fila.nombreProductoDevuelto,
+    formatoVentaProductoDevuelto: fila.formatoVentaProductoDevuelto,
+    cantidadDevuelta: formatearMilesimas(fila.cantidadDevueltaMilesimas),
+    esBolsaAbierta: fila.esBolsaAbierta,
+    // Sin bolsa abierta el alta guarda aquí las unidades devueltas, que ya figuran en `cantidadDevuelta`: no se repiten
+    cantidadStockIngresado:
+      fila.esBolsaAbierta && fila.cantidadStockIngresadoMilesimas !== null
+        ? formatearMilesimas(fila.cantidadStockIngresadoMilesimas)
+        : null,
+    idProductoEntregado: fila.idProductoEntregado,
+    nombreProductoEntregado: fila.nombreProductoEntregado,
+    formatoVentaProductoEntregado: fila.formatoVentaProductoEntregado,
+    cantidadEntregada: formatearMilesimas(fila.cantidadEntregadaMilesimas),
+    saldoResultante: formatearCentavos(fila.saldoResultanteCentavos),
+    idMedioPago: fila.idMedioPago,
+    nombreMedioPago: fila.nombreMedioPago,
   };
 }
 

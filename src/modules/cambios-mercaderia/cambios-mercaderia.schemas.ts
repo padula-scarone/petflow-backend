@@ -1,10 +1,18 @@
 import { z } from "zod";
-import { ID_PRODUCTO_MAXIMO, ID_VENTA_MAXIMO } from "../ventas/ventas.schemas.js";
+import {
+  CANTIDAD_POR_PAGINA_MAXIMA,
+  CANTIDAD_POR_PAGINA_PREDETERMINADA,
+  enteroDesdeTexto,
+  fechaCalendarioSchema,
+  ID_PRODUCTO_MAXIMO,
+  ID_VENTA_MAXIMO,
+  PAGINA_MAXIMA,
+} from "../ventas/ventas.schemas.js";
 
 // --- CONSTANTES ---
 
 /** Tope de `idMedioPago`: máximo de una columna integer de PostgreSQL (más allá, la BD falla con 500). */
-const ID_MEDIO_PAGO_MAXIMO = 2_147_483_647;
+export const ID_MEDIO_PAGO_MAXIMO = 2_147_483_647;
 
 /**
  * Tope de una cantidad: máximo de una columna decimal(10,3). A diferencia de la venta, la cantidad devuelta
@@ -51,3 +59,46 @@ export const registrarCambioSchema = z.object({
   /** Obligatorio solo si el saldo es mayor a 0; con saldo 0 se ignora. */
   idMedioPago: z.number().int().positive().max(ID_MEDIO_PAGO_MAXIMO).optional(),
 });
+
+// --- CONSULTA DE HISTORIAL: CONSTANTES ---
+
+/** Estados que se pueden filtrar en el historial de cambios. Sin filtro se devuelven todos. */
+export const ESTADOS_CAMBIO_HISTORIAL = ["ACTIVO", "ANULADO"] as const;
+
+/** Vínculos que se pueden filtrar: cambios con o sin venta original (`idVentaOriginal`). */
+export const VINCULOS_CAMBIO_HISTORIAL = ["VINCULADO", "DESVINCULADO"] as const;
+
+// --- CONSULTA DE HISTORIAL: ESQUEMA ---
+
+/**
+ * Contrato de entrada de `GET /api/cambios-mercaderia` (query params, todos opcionales).
+ * Los valores llegan como texto; la conversión a número es estricta (ver `enteroDesdeTexto` de ventas).
+ * Las fechas son inclusivas en ambos extremos y se interpretan en hora de Argentina.
+ * `idProducto` coincide con el producto devuelto o con el entregado. Todos los filtros se combinan con AND.
+ */
+export const consultarHistorialCambiosSchema = z
+  .object({
+    pagina: enteroDesdeTexto(1, PAGINA_MAXIMA).default(1),
+    cantidadPorPagina: enteroDesdeTexto(1, CANTIDAD_POR_PAGINA_MAXIMA).default(CANTIDAD_POR_PAGINA_PREDETERMINADA),
+    fechaDesde: fechaCalendarioSchema.optional(),
+    fechaHasta: fechaCalendarioSchema.optional(),
+    idProducto: enteroDesdeTexto(1, ID_PRODUCTO_MAXIMO).optional(),
+    estado: z.enum(ESTADOS_CAMBIO_HISTORIAL).optional(),
+    vinculo: z.enum(VINCULOS_CAMBIO_HISTORIAL).optional(),
+    idMedioPago: enteroDesdeTexto(1, ID_MEDIO_PAGO_MAXIMO).optional(),
+  })
+  // Con el formato AAAA-MM-DD la comparación de texto equivale a la cronológica.
+  // Es una copia de la regla del historial de ventas: esa vive dentro de su propio esquema y no se puede reutilizar sin tocarlo
+  .superRefine((consulta, contexto) => {
+    if (
+      consulta.fechaDesde !== undefined &&
+      consulta.fechaHasta !== undefined &&
+      consulta.fechaDesde > consulta.fechaHasta
+    ) {
+      contexto.addIssue({
+        code: "custom",
+        path: ["fechaDesde"],
+        message: "fechaDesde no puede ser posterior a fechaHasta",
+      });
+    }
+  });
