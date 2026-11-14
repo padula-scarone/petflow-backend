@@ -594,6 +594,9 @@ export function calcularCobroFiado(
 /**
  * Valida el monto recibido de un pago y calcula su vuelto.
  * Solo el efectivo admite monto recibido. Si no se informa, no se asume pago exacto: ambos quedan nulos.
+ * ATENCIÓN: es la misma regla, con las mismas validaciones y los mismos mensajes, que
+ * `calcularMontoRecibidoYVueltoCambio` de `cambios-mercaderia.service.ts` (que trabaja con Decimal exacto).
+ * Si cambia una, hay que cambiar la otra.
  * @param idMedioPago Medio del pago, para el mensaje de error.
  * @param tipo Tipo del medio.
  * @param montoRecibido Monto recibido en pesos, si el cliente lo informó.

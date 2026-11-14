@@ -6,6 +6,7 @@ import {
   fechaCalendarioSchema,
   ID_PRODUCTO_MAXIMO,
   ID_VENTA_MAXIMO,
+  MONTO_RECIBIDO_MAXIMO,
   PAGINA_MAXIMA,
 } from "../ventas/ventas.schemas.js";
 
@@ -19,6 +20,9 @@ export const ID_MEDIO_PAGO_MAXIMO = 2_147_483_647;
  * no está acotada por el stock, así que sin este tope un valor enorme haría fallar la BD con 500.
  */
 export const CANTIDAD_MAXIMA = 9_999_999.999;
+
+/** Largo máximo de `motivoCambio`: coincide con la columna VARCHAR(200). */
+export const MOTIVO_CAMBIO_LONGITUD_MAXIMA = 200;
 
 // --- HELPERS DE VALIDACIÓN ---
 
@@ -39,26 +43,62 @@ const cantidadSchema = z
   .max(CANTIDAD_MAXIMA, `La cantidad no puede superar ${CANTIDAD_MAXIMA}`)
   .refine(conDecimalesMaximos(3), "La cantidad admite hasta 3 decimales");
 
+/** Peso devuelto de una bolsa abierta, en kilos: positivo, hasta 3 decimales y dentro del tope de la columna del granel. */
+const pesoDevueltoSchema = z
+  .number()
+  .positive()
+  .max(CANTIDAD_MAXIMA, `El peso devuelto no puede superar ${CANTIDAD_MAXIMA}`)
+  .refine(conDecimalesMaximos(3), "El peso devuelto admite hasta 3 decimales");
+
 // --- ESQUEMA PRINCIPAL ---
 
 /**
  * Contrato de entrada de `POST /api/cambios-mercaderia`.
  * El usuario no viaja en el body: sale del token. Si llega `idUsuario`, Zod lo descarta sin error (el objeto no es estricto).
- * Tampoco viajan el producto que ingresa al stock, el saldo ni los precios: los calcula el servidor.
- * Las reglas que dependen de la base (formato del producto, ticket, saldo, medio de pago) las valida el service.
+ * Tampoco viajan el producto que ingresa al stock, el saldo, los precios ni el vuelto: los calcula el servidor
+ * (un `vuelto` en el body se descarta igual que `idUsuario`).
+ * Las reglas que dependen de la base (formato del producto, ticket, tope del peso, saldo, medio de pago, efectivo)
+ * las valida el service.
  */
-export const registrarCambioSchema = z.object({
-  /** Ticket de la venta que originó el cambio; sin él, el cambio es aislado. */
-  idVentaOriginal: z.number().int().positive().max(ID_VENTA_MAXIMO).optional(),
-  idProductoDevuelto: z.number().int().positive().max(ID_PRODUCTO_MAXIMO),
-  cantidadDevuelta: cantidadSchema,
-  /** Bolsa abierta: el contenido se suma al granel del producto devuelto. */
-  esBolsaAbierta: z.boolean().default(false),
-  idProductoEntregado: z.number().int().positive().max(ID_PRODUCTO_MAXIMO),
-  cantidadEntregada: cantidadSchema,
-  /** Obligatorio solo si el saldo es mayor a 0; con saldo 0 se ignora. */
-  idMedioPago: z.number().int().positive().max(ID_MEDIO_PAGO_MAXIMO).optional(),
-});
+export const registrarCambioSchema = z
+  .object({
+    /** Ticket de la venta que originó el cambio; sin él, el cambio es aislado. */
+    idVentaOriginal: z.number().int().positive().max(ID_VENTA_MAXIMO).optional(),
+    idProductoDevuelto: z.number().int().positive().max(ID_PRODUCTO_MAXIMO),
+    /** Unidades devueltas; con bolsa abierta son bolsas enteras. */
+    cantidadDevuelta: cantidadSchema,
+    /** Bolsa abierta: el contenido se suma al granel del producto devuelto. */
+    esBolsaAbierta: z.boolean().default(false),
+    /** Kilos que se devuelven de la bolsa abierta (el total, si son varias bolsas); sin él se usa el peso nominal. */
+    pesoDevuelto: pesoDevueltoSchema.optional(),
+    idProductoEntregado: z.number().int().positive().max(ID_PRODUCTO_MAXIMO),
+    cantidadEntregada: cantidadSchema,
+    /** Obligatorio solo si el saldo es mayor a 0; con saldo 0 se ignora. */
+    idMedioPago: z.number().int().positive().max(ID_MEDIO_PAGO_MAXIMO).optional(),
+    /** Solo con un medio en efectivo y saldo mayor a 0; el service lo valida (el esquema no conoce el tipo del medio). */
+    montoRecibido: z
+      .number()
+      .positive()
+      .max(MONTO_RECIBIDO_MAXIMO)
+      .refine(conDecimalesMaximos(2), "El monto recibido admite hasta 2 decimales")
+      .optional(),
+    /** Texto del motivo del cambio; el front lo arma a partir del motivo elegido. Se recorta antes de medirlo. */
+    motivoCambio: z
+      .string({ error: "El motivo del cambio es obligatorio y debe ser texto" })
+      .trim()
+      .min(1, "El motivo del cambio no puede estar vacío")
+      .max(MOTIVO_CAMBIO_LONGITUD_MAXIMA, `El motivo del cambio admite hasta ${MOTIVO_CAMBIO_LONGITUD_MAXIMA} caracteres`),
+  })
+  // Informar el peso sin marcar bolsa abierta se rechaza: descartarlo en silencio dejaría ingresar al stock otra cantidad
+  .superRefine((cambio, contexto) => {
+    if (cambio.pesoDevuelto !== undefined && !cambio.esBolsaAbierta) {
+      contexto.addIssue({
+        code: "custom",
+        path: ["pesoDevuelto"],
+        message: "El peso devuelto solo se informa con bolsa abierta",
+      });
+    }
+  });
 
 // --- CONSULTA DE HISTORIAL: CONSTANTES ---
 
@@ -102,3 +142,16 @@ export const consultarHistorialCambiosSchema = z
       });
     }
   });
+
+// --- DETALLE DE UN CAMBIO: PARÁMETRO DE RUTA ---
+
+/** Tope de `idCambio`: máximo de una columna integer de PostgreSQL (más allá, la BD falla con 500). */
+export const ID_CAMBIO_MAXIMO = 2_147_483_647;
+
+/**
+ * Contrato de entrada de `GET /api/cambios-mercaderia/:idCambio`: el id llega como texto por la ruta
+ * y la conversión a número es estricta (ver `enteroDesdeTexto` de ventas).
+ */
+export const consultarCambioSchema = z.object({
+  idCambio: enteroDesdeTexto(1, ID_CAMBIO_MAXIMO),
+});

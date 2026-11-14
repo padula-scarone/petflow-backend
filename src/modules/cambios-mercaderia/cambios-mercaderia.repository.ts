@@ -1,9 +1,10 @@
 import type { Prisma } from "../../generated/prisma/client.js";
+import { aDecimal, Decimal } from "../../shared/decimal.js";
 import { prisma } from "../../shared/prisma.js";
-import { crearErrorStockInsuficiente } from "../ventas/ventas.errors.js";
-import { crearErrorSinCajaParaCambio } from "./cambios-mercaderia.errors.js";
+import { crearErrorSinCajaParaCambio, crearErrorStockInsuficienteCambio } from "./cambios-mercaderia.errors.js";
 import type {
   CambioCalculado,
+  CambioDetalleLeido,
   CambioPersistido,
   FiltroHistorialCambios,
   LecturaCambio,
@@ -11,6 +12,7 @@ import type {
   PaginaHistorialCambios,
   ProductoParaCambio,
   RegistrarCambioInput,
+  ResultadoAltaCambio,
   VentaOriginalLeida,
 } from "./cambios-mercaderia.types.js";
 
@@ -23,8 +25,8 @@ type CalcularCambio = (lectura: LecturaCambio) => CambioCalculado;
 type OperacionStock = {
   idProducto: number;
   tipo: "DESCUENTO" | "INGRESO";
-  /** Cantidad a mover, en milésimas. */
-  cantidadMilesimas: number;
+  /** Cantidad a mover. */
+  cantidad: Decimal;
 };
 
 /** Desempate de dos operaciones sobre el mismo producto: primero se descuenta y después se ingresa. */
@@ -50,8 +52,10 @@ export function construirCondicionCambiosActivos(
 
 /**
  * Guarda un cambio de mercadería completo en una única transacción: ingresa el stock devuelto,
- * descuenta el entregado y crea el registro. Es la única capa del módulo que toca Prisma.
+ * descuenta el entregado, crea el registro y lo relee con el mismo detalle que consulta `GET /:idCambio`.
+ * Es la única capa del módulo que toca Prisma.
  * Si algo falla (recurso, regla, caja, stock, BD) se revierte todo: no quedan stocks movidos sin cambio registrado.
+ * La relectura va antes de confirmar: lo que se responde es exactamente lo que quedó guardado.
  * Usa el nivel de aislamiento predeterminado (READ COMMITTED), como el resto de las transacciones del sistema.
  * No toca `saldoActual` de la caja: el ingreso queda como `idCaja` + `saldoResultante`, igual que en las ventas.
  *
@@ -60,14 +64,14 @@ export function construirCondicionCambiosActivos(
  * en conjunto, más de lo vendido. El stock del entregado sí tiene guarda atómica.
  * @param input Cuerpo validado del cambio más el usuario tomado del token.
  * @param calcular Cálculo de negocio, ejecutado dentro de la transacción con datos recién leídos.
- * @returns Los datos del cambio persistido.
- * @throws {ErrorNegocio} Las del cálculo (404/400/409), no hay caja abierta (409) o el stock del entregado
+ * @returns Los datos del cambio persistido y el cambio releído (detalle completo).
+ * @throws {ErrorNegocioCambio} Las del cálculo (404/400/409), no hay caja abierta (409) o el stock del entregado
  * no alcanza (409). Se lanza como objeto puro, no como Error.
  */
 export async function registrarCambioAtomico(
   input: RegistrarCambioInput,
   calcular: CalcularCambio,
-): Promise<CambioPersistido> {
+): Promise<ResultadoAltaCambio> {
   return prisma.$transaction(async (transaccion) => {
     // --- LECTURA ---
     const idsProductos = [...new Set([input.idProductoDevuelto, input.idProductoEntregado])];
@@ -90,9 +94,9 @@ export async function registrarCambioAtomico(
         nombre: producto.nombre,
         formatoVenta: producto.formatoVenta,
         activo: producto.estado === "ACTIVO",
-        precioCentavos: aCentavos(producto.precioVenta),
-        costoCentavos: aCentavos(producto.costoActual),
-        pesoUnitarioMilesimas: producto.pesoUnitario === null ? null : aMilesimas(producto.pesoUnitario),
+        precioVenta: aDecimal(producto.precioVenta),
+        costoActual: aDecimal(producto.costoActual),
+        pesoUnitario: producto.pesoUnitario === null ? null : aDecimal(producto.pesoUnitario),
         productoGranel:
           producto.productoGranel === null
             ? null
@@ -109,7 +113,7 @@ export async function registrarCambioAtomico(
       input.idVentaOriginal === undefined ? null : await leerVentaOriginal(transaccion, input.idVentaOriginal);
 
     // Lo ya devuelto de ese ticket y producto en cambios activos: un cambio anulado vuelve a dejar disponible la cantidad
-    let cantidadYaDevueltaMilesimas = 0;
+    let cantidadYaDevuelta = new Decimal(0);
     if (ventaOriginal !== null) {
       const acumulado = await transaccion.cambioMercaderia.aggregate({
         _sum: { cantidadDevuelta: true },
@@ -118,8 +122,7 @@ export async function registrarCambioAtomico(
           idProductoDevuelto: input.idProductoDevuelto,
         },
       });
-      cantidadYaDevueltaMilesimas =
-        acumulado._sum.cantidadDevuelta === null ? 0 : aMilesimas(acumulado._sum.cantidadDevuelta);
+      cantidadYaDevuelta = acumulado._sum.cantidadDevuelta === null ? new Decimal(0) : aDecimal(acumulado._sum.cantidadDevuelta);
     }
 
     // El medio se lee siempre que venga: el cálculo decide si hace falta (con saldo 0 se ignora)
@@ -130,7 +133,7 @@ export async function registrarCambioAtomico(
       devuelto: productos.find((producto) => producto.idProducto === input.idProductoDevuelto) ?? null,
       entregado: productos.find((producto) => producto.idProducto === input.idProductoEntregado) ?? null,
       ventaOriginal,
-      cantidadYaDevueltaMilesimas,
+      cantidadYaDevuelta,
       medioPago,
     });
 
@@ -150,12 +153,8 @@ export async function registrarCambioAtomico(
     // Orden fijo por producto: dos cambios simultáneos que comparten productos bloquean las filas
     // en el mismo orden y no se traban entre sí (deadlock)
     const operaciones: OperacionStock[] = [
-      { idProducto: input.idProductoEntregado, tipo: "DESCUENTO", cantidadMilesimas: calculo.cantidadEntregadaMilesimas },
-      {
-        idProducto: calculo.idProductoStockIngresado,
-        tipo: "INGRESO",
-        cantidadMilesimas: calculo.cantidadStockIngresadoMilesimas,
-      },
+      { idProducto: input.idProductoEntregado, tipo: "DESCUENTO", cantidad: calculo.cantidadEntregada },
+      { idProducto: calculo.idProductoStockIngresado, tipo: "INGRESO", cantidad: calculo.cantidadStockIngresado },
     ];
     operaciones.sort(
       (primera, segunda) =>
@@ -164,7 +163,7 @@ export async function registrarCambioAtomico(
     );
 
     for (const operacion of operaciones) {
-      const cantidad = milesimasAString(operacion.cantidadMilesimas);
+      const cantidad = operacion.cantidad.toFixed(3);
       if (operacion.tipo === "DESCUENTO") {
         // Descuento condicionado: solo descuenta si todavía alcanza. Si otra operación consumió el stock
         // entre la lectura y este paso (o nunca alcanzó), count vale 0 y se aborta con 409.
@@ -174,7 +173,7 @@ export async function registrarCambioAtomico(
           data: { stockFisico: { decrement: cantidad } },
         });
         if (actualizados.count !== 1) {
-          throw crearErrorStockInsuficiente(operacion.idProducto);
+          throw crearErrorStockInsuficienteCambio(operacion.idProducto);
         }
       } else {
         // Incremento atómico en la BD con el decimal exacto: sin pasar por coma flotante ni leer el stock antes
@@ -193,29 +192,44 @@ export async function registrarCambioAtomico(
         idUsuario: input.idUsuario,
         idCaja: caja.idCaja,
         idProductoDevuelto: input.idProductoDevuelto,
-        cantidadDevuelta: milesimasAString(calculo.cantidadDevueltaMilesimas),
+        cantidadDevuelta: calculo.cantidadDevuelta.toFixed(3),
         esBolsaAbierta: input.esBolsaAbierta,
-        precioUnitarioDevuelto: centavosAString(calculo.precioUnitarioDevueltoCentavos),
+        precioUnitarioDevuelto: calculo.precioUnitarioDevuelto.toFixed(2),
         idProductoStockIngresado: calculo.idProductoStockIngresado,
-        cantidadStockIngresado: milesimasAString(calculo.cantidadStockIngresadoMilesimas),
+        cantidadStockIngresado: calculo.cantidadStockIngresado.toFixed(3),
         idProductoEntregado: input.idProductoEntregado,
-        cantidadEntregada: milesimasAString(calculo.cantidadEntregadaMilesimas),
-        precioUnitarioEntregado: centavosAString(calculo.precioUnitarioEntregadoCentavos),
-        costoUnitarioCongeladoEntregado: centavosAString(calculo.costoUnitarioEntregadoCentavos),
-        saldoResultante: centavosAString(calculo.saldoCentavos),
+        cantidadEntregada: calculo.cantidadEntregada.toFixed(3),
+        precioUnitarioEntregado: calculo.precioUnitarioEntregado.toFixed(2),
+        costoUnitarioCongeladoEntregado: calculo.costoUnitarioEntregado.toFixed(2),
+        saldoResultante: calculo.saldo.toFixed(2),
         idMedioPago: calculo.idMedioPago,
+        motivoCambio: input.motivoCambio,
+        // Nulos si no hubo saldo, si el medio no es efectivo o si no se informó el recibido
+        montoRecibido: calculo.montoRecibido === null ? null : calculo.montoRecibido.toFixed(2),
+        vuelto: calculo.vuelto === null ? null : calculo.vuelto.toFixed(2),
       },
       select: { idCambio: true, fechaHora: true },
     });
 
+    // --- RELECTURA ---
+    // Dentro de la misma transacción: ve lo que se acaba de escribir y nada puede cambiarlo antes de responder
+    const detalle = await leerDetalleCambio(transaccion, cambioCreado.idCambio);
+    if (detalle === null) {
+      // Inalcanzable: el cambio se creó en esta misma transacción. El error revierte todo y sube a Express como 500
+      throw new Error(`No se pudo releer el cambio ${cambioCreado.idCambio} recién creado`);
+    }
+
     return {
-      ...calculo,
-      idCambio: cambioCreado.idCambio,
-      fechaHora: cambioCreado.fechaHora,
-      idVentaOriginal: ventaOriginal === null ? null : ventaOriginal.idVenta,
-      idProductoDevuelto: input.idProductoDevuelto,
-      esBolsaAbierta: input.esBolsaAbierta,
-      idProductoEntregado: input.idProductoEntregado,
+      persistido: {
+        ...calculo,
+        idCambio: cambioCreado.idCambio,
+        fechaHora: cambioCreado.fechaHora,
+        idVentaOriginal: ventaOriginal === null ? null : ventaOriginal.idVenta,
+        idProductoDevuelto: input.idProductoDevuelto,
+        esBolsaAbierta: input.esBolsaAbierta,
+        idProductoEntregado: input.idProductoEntregado,
+      },
+      detalle,
     };
   });
 }
@@ -250,22 +264,22 @@ async function leerVentaOriginal(transaccion: ClienteTransaccion, idVenta: numbe
     estado: venta.estado,
     detalles: venta.detalles.map((detalle) => ({
       idProducto: detalle.idProducto,
-      cantidadMilesimas: aMilesimas(detalle.cantidad),
-      precioUnitarioCentavos: aCentavos(detalle.precioUnitarioVigente),
+      cantidad: aDecimal(detalle.cantidad),
+      precioUnitario: aDecimal(detalle.precioUnitarioVigente),
     })),
   };
 }
 
 /**
  * Lee un medio de pago.
- * @returns El medio con su estado, o `null` si no existe (el cálculo decide el 404).
+ * @returns El medio con su estado y su tipo (decide si admite monto recibido), o `null` si no existe (el cálculo decide el 404).
  */
 async function leerMedioPago(transaccion: ClienteTransaccion, idMedioPago: number): Promise<MedioPagoParaCambio | null> {
   const medio = await transaccion.medioPago.findUnique({
     where: { idMedioPago },
-    select: { idMedioPago: true, estado: true },
+    select: { idMedioPago: true, estado: true, tipo: true },
   });
-  return medio === null ? null : { idMedioPago: medio.idMedioPago, activo: medio.estado === "ACTIVO" };
+  return medio === null ? null : { idMedioPago: medio.idMedioPago, activo: medio.estado === "ACTIVO", tipo: medio.tipo };
 }
 
 // --- CONSULTA DE HISTORIAL ---
@@ -360,14 +374,14 @@ export async function buscarHistorialCambios(
       idProductoDevuelto: fila.idProductoDevuelto,
       nombreProductoDevuelto: fila.productoDevuelto.nombre,
       formatoVentaProductoDevuelto: fila.productoDevuelto.formatoVenta,
-      cantidadDevueltaMilesimas: aMilesimas(fila.cantidadDevuelta),
+      cantidadDevuelta: aDecimal(fila.cantidadDevuelta),
       esBolsaAbierta: fila.esBolsaAbierta,
-      cantidadStockIngresadoMilesimas: aMilesimasOpcional(fila.cantidadStockIngresado),
+      cantidadStockIngresado: fila.cantidadStockIngresado === null ? null : aDecimal(fila.cantidadStockIngresado),
       idProductoEntregado: fila.idProductoEntregado,
       nombreProductoEntregado: fila.productoEntregado.nombre,
       formatoVentaProductoEntregado: fila.productoEntregado.formatoVenta,
-      cantidadEntregadaMilesimas: aMilesimas(fila.cantidadEntregada),
-      saldoResultanteCentavos: aCentavos(fila.saldoResultante),
+      cantidadEntregada: aDecimal(fila.cantidadEntregada),
+      saldoResultante: aDecimal(fila.saldoResultante),
       idMedioPago: fila.idMedioPago,
       nombreMedioPago: fila.medioPago?.nombre ?? null,
     })),
@@ -375,33 +389,111 @@ export async function buscarHistorialCambios(
   };
 }
 
-// --- UTILIDADES ---
-// Copias locales de las de ventas, que no se exportan: se evita tocar ese módulo. Su extracción a `shared` es deuda registrada.
+// --- DETALLE DE CAMBIO ---
 
-// Conversiones desde Decimal de Prisma a enteros internos
-/** Pesos (decimal de BD) a centavos enteros. */
-function aCentavos(valor: { toNumber(): number }): number {
-  return Math.round(valor.toNumber() * 100);
+/**
+ * Lee un cambio completo con una sola consulta: el cambio y, por relación, la venta, los tres productos,
+ * el medio de pago y los dos usuarios (vendedor y quien anuló). Así no hay una consulta por relación (N+1)
+ * y todo sale de la misma lectura.
+ * Recibe el cliente para poder usarse dentro de la transacción del alta (relectura del cambio recién creado)
+ * y dentro de la lectura de solo lectura del detalle.
+ * Los nombres de producto, de medio de pago y de usuario son los vigentes: no se congelan en el cambio.
+ * @returns El cambio, o `null` si no existe (el service decide el 404).
+ */
+async function leerDetalleCambio(transaccion: ClienteTransaccion, idCambio: number): Promise<CambioDetalleLeido | null> {
+  const cambio = await transaccion.cambioMercaderia.findUnique({
+    where: { idCambio },
+    select: {
+      idCambio: true,
+      fechaHora: true,
+      estado: true,
+      motivoCambio: true,
+      esBolsaAbierta: true,
+      cantidadDevuelta: true,
+      precioUnitarioDevuelto: true,
+      cantidadStockIngresado: true,
+      cantidadEntregada: true,
+      precioUnitarioEntregado: true,
+      saldoResultante: true,
+      montoRecibido: true,
+      vuelto: true,
+      fechaHoraAnulacion: true,
+      motivoAnulacion: true,
+      idVentaOriginal: true,
+      ventaOriginal: { select: { numeroComprobante: true } },
+      idProductoDevuelto: true,
+      productoDevuelto: { select: { nombre: true, formatoVenta: true } },
+      idProductoStockIngresado: true,
+      productoStockIngresado: { select: { nombre: true } },
+      idProductoEntregado: true,
+      productoEntregado: { select: { nombre: true, formatoVenta: true } },
+      idMedioPago: true,
+      medioPago: { select: { nombre: true } },
+      usuario: { select: { idUsuario: true, nombre: true } },
+      usuarioAnulacion: { select: { idUsuario: true, nombre: true } },
+    },
+  });
+  if (cambio === null) {
+    return null;
+  }
+
+  return {
+    idCambio: cambio.idCambio,
+    fechaHora: cambio.fechaHora,
+    estado: cambio.estado,
+    motivoCambio: cambio.motivoCambio,
+    ventaOriginal:
+      cambio.idVentaOriginal === null
+        ? null
+        : { idVenta: cambio.idVentaOriginal, numeroComprobante: cambio.ventaOriginal?.numeroComprobante ?? null },
+    productoDevuelto: {
+      idProducto: cambio.idProductoDevuelto,
+      nombre: cambio.productoDevuelto.nombre,
+      formatoVenta: cambio.productoDevuelto.formatoVenta,
+      cantidadDevuelta: aDecimal(cambio.cantidadDevuelta),
+      esBolsaAbierta: cambio.esBolsaAbierta,
+      precioUnitario: aDecimal(cambio.precioUnitarioDevuelto),
+    },
+    productoStockIngresado: {
+      idProducto: cambio.idProductoStockIngresado,
+      nombre: cambio.productoStockIngresado.nombre,
+      cantidadStockIngresado: aDecimal(cambio.cantidadStockIngresado),
+    },
+    productoEntregado: {
+      idProducto: cambio.idProductoEntregado,
+      nombre: cambio.productoEntregado.nombre,
+      formatoVenta: cambio.productoEntregado.formatoVenta,
+      cantidadEntregada: aDecimal(cambio.cantidadEntregada),
+      precioUnitario: aDecimal(cambio.precioUnitarioEntregado),
+    },
+    saldoResultante: aDecimal(cambio.saldoResultante),
+    medioPago:
+      cambio.idMedioPago === null || cambio.medioPago === null
+        ? null
+        : { idMedioPago: cambio.idMedioPago, nombre: cambio.medioPago.nombre },
+    montoRecibido: cambio.montoRecibido === null ? null : aDecimal(cambio.montoRecibido),
+    vuelto: cambio.vuelto === null ? null : aDecimal(cambio.vuelto),
+    vendedor: { idUsuario: cambio.usuario.idUsuario, nombre: cambio.usuario.nombre },
+    // Solo hay auditoría completa en un cambio anulado después de registrarla; en cualquier otro caso es nula
+    anulacion:
+      cambio.fechaHoraAnulacion === null || cambio.motivoAnulacion === null || cambio.usuarioAnulacion === null
+        ? null
+        : {
+            fechaHora: cambio.fechaHoraAnulacion,
+            usuario: { idUsuario: cambio.usuarioAnulacion.idUsuario, nombre: cambio.usuarioAnulacion.nombre },
+            motivo: cambio.motivoAnulacion,
+          },
+  };
 }
 
-/** Cantidad (decimal de BD) a milésimas enteras. */
-function aMilesimas(valor: { toNumber(): number }): number {
-  return Math.round(valor.toNumber() * 1000);
-}
-
-/** Igual que `aMilesimas`, pero conserva `null` por si una columna decimal llegara sin valor. */
-function aMilesimasOpcional(valor: { toNumber(): number } | null): number | null {
-  return valor === null ? null : aMilesimas(valor);
-}
-
-// Conversiones desde enteros internos a strings para columnas Decimal
-// Se usan strings para que Prisma reciba el valor exacto, sin pasar por coma flotante
-/** Centavos enteros a texto con 2 decimales. */
-function centavosAString(centavos: number): string {
-  return (centavos / 100).toFixed(2);
-}
-
-/** Milésimas enteras a texto con 3 decimales. */
-function milesimasAString(milesimas: number): string {
-  return (milesimas / 1000).toFixed(3);
+/**
+ * Busca un cambio completo para `GET /api/cambios-mercaderia/:idCambio`. Es solo lectura.
+ * Corre en una transacción `RepeatableRead` como el resto de las consultas del sistema: todas las lecturas
+ * ven la misma foto de la base aunque el motor resuelva las relaciones con más de una consulta.
+ * @returns El cambio, o `null` si no existe.
+ */
+export async function buscarDetalleCambio(idCambio: number): Promise<CambioDetalleLeido | null> {
+  return prisma.$transaction((transaccion) => leerDetalleCambio(transaccion, idCambio), {
+    isolationLevel: "RepeatableRead",
+  });
 }
