@@ -75,7 +75,8 @@ export async function postRegistrarVenta(req: Request, res: Response): Promise<v
  * Handler de `GET /api/ventas`: lista paginada del historial con filtros opcionales.
  * Valida la query y delega en el service. No contiene reglas de negocio ni exige caja abierta.
  * La sesión validada (cualquier rol) la exige `requerirRol` en la ruta, no este handler.
- * Respuestas: 200 con la página (vacía si está fuera de rango); 400 con detalle por parámetro si la query es inválida.
+ * Filtros opcionales (AND entre sí): fechas, producto, estado, `origen`, `medioPago` (id o `MIXTO`), `textoCliente` y `numeroComprobante`.
+ * Respuestas: 200 con la página (vacía si está fuera de rango) y la hora del servidor; 400 con detalle por parámetro si la query es inválida.
  */
 export async function getConsultarHistorial(req: Request, res: Response): Promise<void> {
   // Los query params llegan siempre como texto: el esquema los convierte de forma estricta
@@ -102,7 +103,7 @@ export async function getConsultarHistorial(req: Request, res: Response): Promis
  * Handler de `GET /api/ventas/:idVenta`: detalle de una venta con sus ítems y pagos.
  * Valida el parámetro de ruta y delega en el service. No contiene reglas de negocio ni exige caja abierta.
  * La sesión y el rol los exige `requerirRol` en la ruta, no este handler.
- * Respuestas: 200 con la venta; 400 con detalle por parámetro si `idVenta` es inválido; 404 si la venta no existe.
+ * Respuestas: 200 con la venta y la hora del servidor; 400 con detalle por parámetro si `idVenta` es inválido; 404 si la venta no existe.
  */
 export async function getConsultarVenta(req: Request, res: Response): Promise<void> {
   // El parámetro de ruta llega como texto: el esquema lo convierte de forma estricta

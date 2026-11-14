@@ -186,6 +186,23 @@ export const ID_PRODUCTO_MAXIMO = 2_147_483_647;
 /** Tope de `idVenta`: mismo máximo de la columna integer de PostgreSQL; un valor mayor haría fallar la BD con 500. */
 export const ID_VENTA_MAXIMO = 2_147_483_647;
 
+// --- FILTROS DEL HISTORIAL: CONSTANTES ---
+
+/** Orígenes que se pueden filtrar en el historial: los mismos valores del enum `OrigenVenta` y del front. */
+export const ORIGENES_VENTA_HISTORIAL = ["MOSTRADOR", "DIGITAL"] as const;
+
+/** Valor de `medioPago` que pide las ventas con más de un pago. El front lo manda en mayúsculas, en el mismo campo que el id. */
+export const VALOR_MEDIO_PAGO_MIXTO = "MIXTO";
+
+/** Tope de `medioPago` cuando es un id: máximo de una columna integer de PostgreSQL (más allá, la BD falla con 500). */
+export const ID_MEDIO_PAGO_MAXIMO = 2_147_483_647;
+
+/** Largo máximo de `textoCliente`: coincide con la columna `cliente_referencia` (VARCHAR(100)). */
+export const TEXTO_CLIENTE_LONGITUD_MAXIMA = 100;
+
+/** Largo máximo de `numeroComprobante`: coincide con la columna `numero_comprobante` (VARCHAR(30)). */
+export const NUMERO_COMPROBANTE_LONGITUD_MAXIMA = 30;
+
 // --- CONSULTA DE HISTORIAL: AUXILIARES ---
 
 /**
@@ -228,12 +245,34 @@ export const fechaCalendarioSchema = z
   .regex(/^\d{4}-\d{2}-\d{2}$/, "Debe tener formato AAAA-MM-DD")
   .refine((fecha) => descomponerFechaCalendario(fecha) !== null, "La fecha no existe en el calendario");
 
+// --- FILTROS DEL HISTORIAL: MEDIO DE PAGO ---
+
+/**
+ * Filtro por medio de pago: el id de un medio (entero positivo) o el literal `MIXTO`.
+ * Es un solo campo con dos formas porque así lo modela el front. Se valida en un único paso (no con una unión)
+ * para que cualquier valor inválido dé un solo mensaje claro; con `abort` el rango no se evalúa si el formato ya falló.
+ * Sale como `number` (id) o como el literal `"MIXTO"`; en minúsculas (`mixto`) se rechaza.
+ */
+export const medioPagoHistorialSchema = z
+  .string()
+  .regex(/^(MIXTO|\d+)$/, {
+    error: `Debe ser el id de un medio de pago (entero sin signo) o ${VALOR_MEDIO_PAGO_MIXTO}`,
+    abort: true,
+  })
+  .refine(
+    (valor) => valor === VALOR_MEDIO_PAGO_MIXTO || (Number(valor) >= 1 && Number(valor) <= ID_MEDIO_PAGO_MAXIMO),
+    `El id del medio de pago debe estar entre 1 y ${ID_MEDIO_PAGO_MAXIMO}`,
+  )
+  .transform((valor) => (valor === VALOR_MEDIO_PAGO_MIXTO ? VALOR_MEDIO_PAGO_MIXTO : Number(valor)));
+
 // --- CONSULTA DE HISTORIAL: ESQUEMA ---
 
 /**
  * Contrato de entrada de `GET /api/ventas` (query params, todos opcionales).
  * Los valores llegan como texto; la conversión a número es estricta (ver `enteroDesdeTexto`).
  * Las fechas son inclusivas en ambos extremos y se interpretan en hora de Argentina.
+ * `textoCliente` y `numeroComprobante` buscan dentro del texto (sin distinguir mayúsculas) y, si quedan vacíos
+ * tras el recorte, equivalen a no filtrar (lo resuelve el service, igual que `busqueda` en productos).
  */
 export const consultarHistorialSchema = z
   .object({
@@ -243,6 +282,10 @@ export const consultarHistorialSchema = z
     fechaHasta: fechaCalendarioSchema.optional(),
     idProducto: enteroDesdeTexto(1, ID_PRODUCTO_MAXIMO).optional(),
     estado: z.enum(ESTADOS_VENTA_HISTORIAL).optional(),
+    origen: z.enum(ORIGENES_VENTA_HISTORIAL).optional(),
+    medioPago: medioPagoHistorialSchema.optional(),
+    textoCliente: z.string().trim().max(TEXTO_CLIENTE_LONGITUD_MAXIMA).optional(),
+    numeroComprobante: z.string().trim().max(NUMERO_COMPROBANTE_LONGITUD_MAXIMA).optional(),
   })
   // Con el formato AAAA-MM-DD la comparación de texto equivale a la cronológica
   .superRefine((consulta, contexto) => {

@@ -1,5 +1,7 @@
 import type { Prisma } from "../../generated/prisma/client.js";
 import { prisma } from "../../shared/prisma.js";
+import { construirCondicionCambiosActivos } from "../cambios-mercaderia/cambios-mercaderia.repository.js";
+import type { DecimalExacto } from "../inventario/inventario.types.js";
 import {
   crearErrorAnulacionSimultanea,
   crearErrorDobleCobro,
@@ -401,14 +403,80 @@ export async function anularVentaAtomica(
   });
 }
 
+// --- LECTURAS AGRUPADAS DE CAMBIOS Y PAGOS ---
+// Una consulta por conjunto de ventas (no una por fila): evitan el N+1 del historial y del detalle.
+
+/**
+ * Cliente de consulta que aceptan las lecturas agrupadas: el cliente normal de Prisma o el de una transacción interactiva.
+ * Solo se exige lo que usan, para poder reutilizarlas dentro y fuera de una transacción.
+ */
+type ClienteConsulta = Pick<typeof prisma, "cambioMercaderia" | "pagoVenta">;
+
+/**
+ * Cuenta los cambios ACTIVOS vinculados a cada venta de un conjunto, en una sola consulta.
+ * El criterio de "cambio activo de una venta" es el mismo del tope de cantidad del alta de cambios
+ * (`construirCondicionCambiosActivos`). Las ventas sin cambios no aparecen en el resultado: el llamador asume 0.
+ * @param idsVentas Ids de la página; vacío no consulta.
+ */
+async function contarCambiosActivosPorVenta(
+  cliente: ClienteConsulta,
+  idsVentas: number[],
+): Promise<Map<number, number>> {
+  const cantidades = new Map<number, number>();
+  if (idsVentas.length === 0) {
+    return cantidades;
+  }
+
+  const grupos = await cliente.cambioMercaderia.groupBy({
+    by: ["idVentaOriginal"],
+    where: construirCondicionCambiosActivos({ in: idsVentas }),
+    _count: { _all: true },
+  });
+  for (const grupo of grupos) {
+    // El where ya excluye los cambios sin venta; la guarda es solo para el tipo (la columna es nullable)
+    if (grupo.idVentaOriginal !== null) {
+      cantidades.set(grupo.idVentaOriginal, grupo._count._all);
+    }
+  }
+  return cantidades;
+}
+
+/**
+ * Consulta lo ya devuelto de cada producto de una venta: suma de `cantidadDevuelta` de los cambios ACTIVOS
+ * vinculados a ella, agrupada por producto devuelto. Es la misma suma que valida el tope del alta de cambios
+ * (mismo criterio vía `construirCondicionCambiosActivos`), pero para todos los productos de una vez.
+ * No se resuelve aquí (devuelve la consulta sin esperar) para poder sumarla a un `$transaction([...])` con la lectura de la venta.
+ */
+function consultarCantidadYaDevueltaPorProducto(cliente: ClienteConsulta, idVenta: number) {
+  return cliente.cambioMercaderia.groupBy({
+    by: ["idProductoDevuelto"],
+    where: construirCondicionCambiosActivos(idVenta),
+    _sum: { cantidadDevuelta: true },
+  });
+}
+
+/**
+ * Busca los ids de las ventas con más de un pago. Prisma no puede contar una relación dentro de un `where`,
+ * así que se agrupan los pagos por venta y se filtra con `having`. Un fiado pendiente (sin pagos) nunca aparece.
+ * Las ventas ANULADAS conservan sus pagos y sí aparecen.
+ */
+async function buscarIdsVentasConPagoMixto(cliente: ClienteConsulta): Promise<number[]> {
+  const grupos = await cliente.pagoVenta.groupBy({
+    by: ["idVenta"],
+    having: { idPagoVenta: { _count: { gt: 1 } } },
+  });
+  return grupos.map((grupo) => grupo.idVenta);
+}
+
 // --- CONSULTA DE HISTORIAL ---
 
 /**
  * Traduce el filtro del historial a la condición de Prisma.
  * Cada filtro presente suma una condición y todas se combinan con AND (son claves del mismo objeto).
  * Se arma con propiedades condicionales porque el tsconfig no admite asignar `undefined` a una propiedad opcional.
+ * @param idsVentasMixtas Ids de las ventas con más de un pago; solo se usan con el filtro `"MIXTO"`.
  */
-function construirCondicionHistorial(filtro: FiltroHistorialVentas): Prisma.VentaWhereInput {
+function construirCondicionHistorial(filtro: FiltroHistorialVentas, idsVentasMixtas: number[]): Prisma.VentaWhereInput {
   const hayFiltroDeFecha = filtro.fechaDesdeInclusiva !== undefined || filtro.fechaHastaExclusiva !== undefined;
 
   return {
@@ -423,6 +491,18 @@ function construirCondicionHistorial(filtro: FiltroHistorialVentas): Prisma.Vent
     ...(filtro.estado !== undefined ? { estado: filtro.estado } : {}),
     // "some" evita duplicar la venta cuando el producto aparece en más de un detalle
     ...(filtro.idProducto !== undefined ? { detalles: { some: { idProducto: filtro.idProducto } } } : {}),
+    ...(filtro.origen !== undefined ? { origen: filtro.origen } : {}),
+    // Medio puntual: al menos un pago con ese medio ("some"). Una venta mixta que lo usó también coincide, igual que
+    // en el filtro del front (que no distingue la mixta al filtrar por un medio). "MIXTO": más de un pago, por sus ids
+    ...(typeof filtro.medioPago === "number" ? { pagos: { some: { idMedioPago: filtro.medioPago } } } : {}),
+    ...(filtro.medioPago === "MIXTO" ? { idVenta: { in: idsVentasMixtas } } : {}),
+    // "contains" con mode insensitive: coincidencia parcial sin distinguir mayúsculas. `%` y `_` actúan como comodines de LIKE
+    ...(filtro.textoCliente !== undefined
+      ? { clienteReferencia: { contains: filtro.textoCliente, mode: "insensitive" } }
+      : {}),
+    ...(filtro.numeroComprobante !== undefined
+      ? { numeroComprobante: { contains: filtro.numeroComprobante, mode: "insensitive" } }
+      : {}),
   };
 }
 
@@ -430,6 +510,8 @@ function construirCondicionHistorial(filtro: FiltroHistorialVentas): Prisma.Vent
  * Busca una página del historial de ventas y el total de registros que cumplen el filtro.
  * Orden fijo: fecha descendente con desempate por id descendente; sin desempate la paginación
  * podría repetir o saltarse filas que comparten la misma fecha.
+ * Todo corre en una transacción `RepeatableRead` (ids de ventas mixtas si hace falta, lista, total y cambios activos),
+ * así que la página, el total y los conteos salen de la misma foto de la base.
  * @param filtro Filtros ya traducidos (fechas como instantes).
  * @param desplazamiento Cantidad de filas a saltar.
  * @param cantidadPorPagina Cantidad máxima de filas a devolver.
@@ -439,61 +521,79 @@ export async function buscarHistorialVentas(
   desplazamiento: number,
   cantidadPorPagina: number,
 ): Promise<PaginaHistorialVentas> {
-  // El mismo where en las filas y en el conteo, para que el total sea coherente con la lista
-  const condicion = construirCondicionHistorial(filtro);
+  // Transacción interactiva (y no el arreglo de consultas) porque hay lecturas que dependen de otras:
+  // los ids mixtos arman el where y los ids de la página arman el conteo de cambios.
+  // RepeatableRead: todas ven la misma foto de la BD aunque entre una venta o un cambio nuevo a mitad de camino
+  return prisma.$transaction(
+    async (transaccion) => {
+      // Solo el filtro "MIXTO" necesita saber qué ventas tienen más de un pago
+      const idsVentasMixtas = filtro.medioPago === "MIXTO" ? await buscarIdsVentasConPagoMixto(transaccion) : [];
 
-  // RepeatableRead: ambas consultas ven la misma foto de la BD aunque entre una venta nueva a mitad de camino
-  const [filas, totalRegistros] = await prisma.$transaction(
-    [
-      prisma.venta.findMany({
+      // El mismo where en las filas y en el conteo, para que el total sea coherente con la lista
+      const condicion = construirCondicionHistorial(filtro, idsVentasMixtas);
+
+      const filas = await transaccion.venta.findMany({
         where: condicion,
         orderBy: [{ fechaHora: "desc" }, { idVenta: "desc" }],
         skip: desplazamiento,
         take: cantidadPorPagina,
-        // Solo las columnas de la grilla: payload liviano
+        // Solo las columnas de la grilla: payload liviano. `fechaHoraPago` sirve para calcular el límite de modificación
         select: {
           idVenta: true,
           numeroComprobante: true,
           fechaHora: true,
+          fechaHoraPago: true,
           estado: true,
           montoTotal: true,
           clienteReferencia: true,
           origen: true,
           modalidadEntrega: true,
         },
-      }),
-      prisma.venta.count({ where: condicion }),
-    ],
+      });
+      const totalRegistros = await transaccion.venta.count({ where: condicion });
+
+      // Una sola consulta agrupada para toda la página (no una por venta)
+      const cambiosActivosPorVenta = await contarCambiosActivosPorVenta(
+        transaccion,
+        filas.map((fila) => fila.idVenta),
+      );
+
+      return {
+        filas: filas.map((fila) => ({
+          idVenta: fila.idVenta,
+          numeroComprobante: fila.numeroComprobante,
+          fechaHora: fila.fechaHora,
+          fechaHoraPago: fila.fechaHoraPago,
+          estado: fila.estado,
+          montoTotalCentavos: aCentavos(fila.montoTotal),
+          clienteReferencia: fila.clienteReferencia,
+          origen: fila.origen,
+          modalidadEntrega: fila.modalidadEntrega,
+          // Las ventas sin cambios no vienen del groupBy: valen 0
+          cantidadCambiosActivos: cambiosActivosPorVenta.get(fila.idVenta) ?? 0,
+        })),
+        totalRegistros,
+      };
+    },
     { isolationLevel: "RepeatableRead" },
   );
-
-  return {
-    filas: filas.map((fila) => ({
-      idVenta: fila.idVenta,
-      numeroComprobante: fila.numeroComprobante,
-      fechaHora: fila.fechaHora,
-      estado: fila.estado,
-      montoTotalCentavos: aCentavos(fila.montoTotal),
-      clienteReferencia: fila.clienteReferencia,
-      origen: fila.origen,
-      modalidadEntrega: fila.modalidadEntrega,
-    })),
-    totalRegistros,
-  };
 }
 
 // --- CONSULTA DE UNA VENTA ---
 
 /**
- * Busca una venta por id con sus ítems y pagos. Es solo lectura: no usa `$transaction`.
+ * Busca una venta por id con sus ítems y pagos. Es solo lectura.
  * El `select` pide únicamente lo que el contrato devuelve; el costo congelado nunca sale de la base.
  * `motivoDescuento`, `montoRecibido` y `vuelto` son nulos en las ventas que no los tienen.
  * Ítems y pagos van ordenados por id para que la respuesta sea determinista.
+ * La venta y lo ya devuelto por producto se leen en un `$transaction([...])` con `RepeatableRead` explícito
+ * (el nivel por defecto, READ COMMITTED, no garantiza la misma foto entre las dos lecturas).
  * @param idVenta Id de la venta, ya validado.
  * @returns La venta, o `null` si no existe (el service decide el 404).
  */
 export async function buscarVentaPorId(idVenta: number): Promise<VentaDetallada | null> {
-  const venta = await prisma.venta.findUnique({
+  // Las consultas se declaran sin esperar y se ejecutan juntas en el $transaction de más abajo
+  const consultaVenta = prisma.venta.findUnique({
     where: { idVenta },
     select: {
       idVenta: true,
@@ -536,8 +636,22 @@ export async function buscarVentaPorId(idVenta: number): Promise<VentaDetallada 
     },
   });
 
+  const [venta, devueltoPorProducto] = await prisma.$transaction(
+    [consultaVenta, consultarCantidadYaDevueltaPorProducto(prisma, idVenta)],
+    { isolationLevel: "RepeatableRead" },
+  );
+
+  // 404 antes de armar nada: sin venta no hay ítems a los que asignarles lo ya devuelto
   if (venta === null) {
     return null;
+  }
+
+  // Suma de lo devuelto por producto: se busca por idProducto al armar cada ítem
+  const cantidadYaDevueltaPorProducto = new Map<number, DecimalExacto>();
+  for (const grupo of devueltoPorProducto) {
+    if (grupo._sum.cantidadDevuelta !== null) {
+      cantidadYaDevueltaPorProducto.set(grupo.idProductoDevuelto, grupo._sum.cantidadDevuelta);
+    }
   }
 
   // Se convierte lo leído (Decimal) a enteros para que el service formatee sin coma flotante
@@ -562,6 +676,9 @@ export async function buscarVentaPorId(idVenta: number): Promise<VentaDetallada 
       cantidadMilesimas: aMilesimas(detalle.cantidad),
       precioUnitarioCentavos: aCentavos(detalle.precioUnitarioVigente),
       subtotalCentavos: aCentavos(detalle.subtotal),
+      // Es el total del producto en la venta: si figura en dos líneas (datos antiguos) ambas llevan el mismo valor,
+      // igual que el tope del alta de cambios, que suma por producto
+      cantidadYaDevuelta: cantidadYaDevueltaPorProducto.get(detalle.producto.idProducto) ?? null,
     })),
     pagos: venta.pagos.map((pago) => ({
       idMedioPago: pago.medioPago.idMedioPago,

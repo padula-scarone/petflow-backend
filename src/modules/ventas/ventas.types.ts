@@ -1,4 +1,5 @@
 import type { z } from "zod";
+import type { DecimalExacto } from "../inventario/inventario.types.js";
 import type {
   anularVentaCuerpoSchema,
   anularVentaParametrosSchema,
@@ -132,6 +133,17 @@ export type FiltroHistorialVentas = {
   /** Solo ventas que contienen este producto en sus detalles. */
   idProducto?: number;
   estado?: EstadoVentaHistorial;
+  /** Solo ventas con este origen. */
+  origen?: OrigenVenta;
+  /**
+   * Un id: ventas con al menos un pago de ese medio (incluye las mixtas, que también lo usaron).
+   * `"MIXTO"`: ventas con más de un pago. Un fiado pendiente no tiene pagos y no coincide con ninguno.
+   */
+  medioPago?: number | "MIXTO";
+  /** Texto contenido en `clienteReferencia`, ya recortado y no vacío. Una venta sin cliente no coincide. */
+  textoCliente?: string;
+  /** Texto contenido en `numeroComprobante`, ya recortado y no vacío. */
+  numeroComprobante?: string;
 };
 
 // --- HISTORIAL DE VENTAS: DATOS DE LA BASE ---
@@ -145,11 +157,15 @@ export type FilaHistorialVenta = {
    */
   numeroComprobante: string | null;
   fechaHora: Date;
+  /** Origen de la ventana de modificación si existe: nulo mientras el fiado no se cobra. */
+  fechaHoraPago: Date | null;
   estado: EstadoVentaHistorial;
   montoTotalCentavos: number;
   clienteReferencia: string | null;
   origen: OrigenVenta;
   modalidadEntrega: ModalidadEntrega;
+  /** Cambios de mercadería ACTIVOS vinculados a esta venta; 0 si no hay. */
+  cantidadCambiosActivos: number;
 };
 
 /** Una página de filas más el total de registros que cumplen el filtro (sin paginar). */
@@ -168,12 +184,19 @@ export type VentaHistorial = {
   /** Fecha y hora en formato ISO 8601. */
   fechaHora: string;
   estado: EstadoVentaHistorial;
+  /**
+   * Hasta cuándo se puede editar o anular (ISO 8601): `LIMITE_MINUTOS_ANULACION` minutos desde el pago
+   * (o desde la venta si no hay pago). Nulo si la venta está ANULADA.
+   */
+  fechaHoraLimiteModificacion: string | null;
   /** Monto total como texto con 2 decimales, igual que en el alta. */
   montoTotal: string;
   /** Nulo si la venta no tiene cliente asociado. */
   clienteReferencia: string | null;
   origen: OrigenVenta;
   modalidadEntrega: ModalidadEntrega;
+  /** Cambios de mercadería ACTIVOS vinculados a esta venta; 0 si no hay. */
+  cantidadCambiosActivos: number;
 };
 
 /** Metadatos de paginación de la respuesta. */
@@ -190,6 +213,8 @@ export type PaginacionHistorial = {
 /** Respuesta exitosa de `GET /api/ventas`. Una página fuera de rango devuelve `ventas` vacío. */
 export type ConsultarHistorialResponse = {
   exito: true;
+  /** Hora del servidor al responder (ISO 8601): el front la compara con `fechaHoraLimiteModificacion`. */
+  fechaHoraServidor: string;
   ventas: VentaHistorial[];
   paginacion: PaginacionHistorial;
 };
@@ -211,6 +236,11 @@ export type ItemVentaDetallado = {
   cantidadMilesimas: number;
   precioUnitarioCentavos: number;
   subtotalCentavos: number;
+  /**
+   * Lo devuelto de este producto en cambios ACTIVOS vinculados a la venta (suma por producto, no por línea),
+   * con su exactitud decimal. Nulo si no hubo ninguno.
+   */
+  cantidadYaDevuelta: DecimalExacto | null;
 };
 
 /** Un pago de la venta tal como se guardó (porcentaje congelado al registrar). */
@@ -272,6 +302,11 @@ export type ItemVentaConsultado = {
   precioUnitario: string;
   /** Texto con 2 decimales. */
   subtotal: string;
+  /**
+   * Lo ya devuelto de este producto en cambios ACTIVOS de la venta, texto con 3 decimales ("0.000" si nada).
+   * Es el total del producto: si figura en más de una línea (datos antiguos), todas llevan el mismo valor.
+   */
+  cantidadYaDevuelta: string;
 };
 
 /** Pago de la venta en la respuesta: montos como texto con 2 decimales. */
@@ -294,6 +329,8 @@ export type VentaConsultada = {
   /** Fecha y hora de pago en formato ISO 8601; nulo si es fiado. */
   fechaHoraPago: string | null;
   estado: EstadoVentaHistorial;
+  /** Hasta cuándo se puede editar o anular (ISO 8601); nulo si la venta está ANULADA. Misma regla que el historial. */
+  fechaHoraLimiteModificacion: string | null;
   origen: OrigenVenta;
   modalidadEntrega: ModalidadEntrega;
   /** Nulo si la venta no tiene cliente asociado. */
@@ -315,6 +352,8 @@ export type VentaConsultada = {
 /** Respuesta exitosa de `GET /api/ventas/:idVenta`. */
 export type ConsultarVentaResponse = {
   exito: true;
+  /** Hora del servidor al responder (ISO 8601): el front la compara con `fechaHoraLimiteModificacion`. */
+  fechaHoraServidor: string;
   venta: VentaConsultada;
 };
 
