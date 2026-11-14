@@ -459,6 +459,8 @@ function consultarCantidadYaDevueltaPorProducto(cliente: ClienteConsulta, idVent
  * Busca los ids de las ventas con más de un pago. Prisma no puede contar una relación dentro de un `where`,
  * así que se agrupan los pagos por venta y se filtra con `having`. Un fiado pendiente (sin pagos) nunca aparece.
  * Las ventas ANULADAS conservan sus pagos y sí aparecen.
+ * Es la única fuente de "venta mixta" del historial: el filtro `MIXTO` la incluye y el filtro por un medio puntual
+ * la excluye, así que los dos conjuntos son disjuntos por construcción.
  */
 async function buscarIdsVentasConPagoMixto(cliente: ClienteConsulta): Promise<number[]> {
   const grupos = await cliente.pagoVenta.groupBy({
@@ -474,7 +476,8 @@ async function buscarIdsVentasConPagoMixto(cliente: ClienteConsulta): Promise<nu
  * Traduce el filtro del historial a la condición de Prisma.
  * Cada filtro presente suma una condición y todas se combinan con AND (son claves del mismo objeto).
  * Se arma con propiedades condicionales porque el tsconfig no admite asignar `undefined` a una propiedad opcional.
- * @param idsVentasMixtas Ids de las ventas con más de un pago; solo se usan con el filtro `"MIXTO"`.
+ * @param idsVentasMixtas Ids de las ventas con más de un pago; se usan con cualquier filtro de `medioPago`
+ * (con `"MIXTO"` se incluyen y con un medio puntual se excluyen).
  */
 function construirCondicionHistorial(filtro: FiltroHistorialVentas, idsVentasMixtas: number[]): Prisma.VentaWhereInput {
   const hayFiltroDeFecha = filtro.fechaDesdeInclusiva !== undefined || filtro.fechaHastaExclusiva !== undefined;
@@ -492,9 +495,13 @@ function construirCondicionHistorial(filtro: FiltroHistorialVentas, idsVentasMix
     // "some" evita duplicar la venta cuando el producto aparece en más de un detalle
     ...(filtro.idProducto !== undefined ? { detalles: { some: { idProducto: filtro.idProducto } } } : {}),
     ...(filtro.origen !== undefined ? { origen: filtro.origen } : {}),
-    // Medio puntual: al menos un pago con ese medio ("some"). Una venta mixta que lo usó también coincide, igual que
-    // en el filtro del front (que no distingue la mixta al filtrar por un medio). "MIXTO": más de un pago, por sus ids
-    ...(typeof filtro.medioPago === "number" ? { pagos: { some: { idMedioPago: filtro.medioPago } } } : {}),
+    // Medio puntual: exactamente un pago y de ese medio. Se logra con "some" del medio y excluyendo las ventas mixtas
+    // (más de un pago), así una venta que usó ese medio junto con otro sale solo con "MIXTO" y nunca en los dos filtros.
+    // "MIXTO": las ventas con más de un pago, por sus ids. Ambos usan la misma lista de ids mixtos, de modo que sus
+    // resultados no se solapan
+    ...(typeof filtro.medioPago === "number"
+      ? { pagos: { some: { idMedioPago: filtro.medioPago } }, idVenta: { notIn: idsVentasMixtas } }
+      : {}),
     ...(filtro.medioPago === "MIXTO" ? { idVenta: { in: idsVentasMixtas } } : {}),
     // "contains" con mode insensitive: coincidencia parcial sin distinguir mayúsculas. `%` y `_` actúan como comodines de LIKE
     ...(filtro.textoCliente !== undefined
@@ -526,8 +533,9 @@ export async function buscarHistorialVentas(
   // RepeatableRead: todas ven la misma foto de la BD aunque entre una venta o un cambio nuevo a mitad de camino
   return prisma.$transaction(
     async (transaccion) => {
-      // Solo el filtro "MIXTO" necesita saber qué ventas tienen más de un pago
-      const idsVentasMixtas = filtro.medioPago === "MIXTO" ? await buscarIdsVentasConPagoMixto(transaccion) : [];
+      // Cualquier filtro de medio de pago necesita saber qué ventas tienen más de un pago: "MIXTO" las incluye y un
+      // medio puntual las excluye. Sin ese filtro no hace falta consultarlas
+      const idsVentasMixtas = filtro.medioPago !== undefined ? await buscarIdsVentasConPagoMixto(transaccion) : [];
 
       // El mismo where en las filas y en el conteo, para que el total sea coherente con la lista
       const condicion = construirCondicionHistorial(filtro, idsVentasMixtas);

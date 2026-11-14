@@ -136,8 +136,9 @@ export type FiltroHistorialVentas = {
   /** Solo ventas con este origen. */
   origen?: OrigenVenta;
   /**
-   * Un id: ventas con al menos un pago de ese medio (incluye las mixtas, que también lo usaron).
-   * `"MIXTO"`: ventas con más de un pago. Un fiado pendiente no tiene pagos y no coincide con ninguno.
+   * Un id: ventas con exactamente un pago, y que sea de ese medio (las mixtas no entran).
+   * `"MIXTO"`: ventas con más de un pago. Los dos filtros son disjuntos: ninguna venta sale en ambos.
+   * Un fiado pendiente no tiene pagos y no coincide con ninguno.
    */
   medioPago?: number | "MIXTO";
   /** Texto contenido en `clienteReferencia`, ya recortado y no vacío. Una venta sin cliente no coincide. */

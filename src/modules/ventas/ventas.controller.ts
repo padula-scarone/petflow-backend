@@ -75,7 +75,7 @@ export async function postRegistrarVenta(req: Request, res: Response): Promise<v
  * Handler de `GET /api/ventas`: lista paginada del historial con filtros opcionales.
  * Valida la query y delega en el service. No contiene reglas de negocio ni exige caja abierta.
  * La sesión validada (cualquier rol) la exige `requerirRol` en la ruta, no este handler.
- * Filtros opcionales (AND entre sí): fechas, producto, estado, `origen`, `medioPago` (id o `MIXTO`), `textoCliente` y `numeroComprobante`.
+ * Filtros opcionales (AND entre sí): fechas, producto, estado, `origen`, `medioPago` (id de un medio con un único pago, o `MIXTO` para más de un pago), `textoCliente` y `numeroComprobante`.
  * Respuestas: 200 con la página (vacía si está fuera de rango) y la hora del servidor; 400 con detalle por parámetro si la query es inválida.
  */
 export async function getConsultarHistorial(req: Request, res: Response): Promise<void> {
