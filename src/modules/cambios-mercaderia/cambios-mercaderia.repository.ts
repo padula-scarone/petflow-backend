@@ -1,4 +1,5 @@
 import type { Prisma } from "../../generated/prisma/client.js";
+import { aDecimal, Decimal } from "../../shared/decimal.js";
 import { prisma } from "../../shared/prisma.js";
 import { crearErrorStockInsuficiente } from "../ventas/ventas.errors.js";
 import { crearErrorSinCajaParaCambio } from "./cambios-mercaderia.errors.js";
@@ -23,8 +24,8 @@ type CalcularCambio = (lectura: LecturaCambio) => CambioCalculado;
 type OperacionStock = {
   idProducto: number;
   tipo: "DESCUENTO" | "INGRESO";
-  /** Cantidad a mover, en milésimas. */
-  cantidadMilesimas: number;
+  /** Cantidad a mover. */
+  cantidad: Decimal;
 };
 
 /** Desempate de dos operaciones sobre el mismo producto: primero se descuenta y después se ingresa. */
@@ -90,9 +91,9 @@ export async function registrarCambioAtomico(
         nombre: producto.nombre,
         formatoVenta: producto.formatoVenta,
         activo: producto.estado === "ACTIVO",
-        precioCentavos: aCentavos(producto.precioVenta),
-        costoCentavos: aCentavos(producto.costoActual),
-        pesoUnitarioMilesimas: producto.pesoUnitario === null ? null : aMilesimas(producto.pesoUnitario),
+        precioVenta: aDecimal(producto.precioVenta),
+        costoActual: aDecimal(producto.costoActual),
+        pesoUnitario: producto.pesoUnitario === null ? null : aDecimal(producto.pesoUnitario),
         productoGranel:
           producto.productoGranel === null
             ? null
@@ -109,7 +110,7 @@ export async function registrarCambioAtomico(
       input.idVentaOriginal === undefined ? null : await leerVentaOriginal(transaccion, input.idVentaOriginal);
 
     // Lo ya devuelto de ese ticket y producto en cambios activos: un cambio anulado vuelve a dejar disponible la cantidad
-    let cantidadYaDevueltaMilesimas = 0;
+    let cantidadYaDevuelta = new Decimal(0);
     if (ventaOriginal !== null) {
       const acumulado = await transaccion.cambioMercaderia.aggregate({
         _sum: { cantidadDevuelta: true },
@@ -118,8 +119,7 @@ export async function registrarCambioAtomico(
           idProductoDevuelto: input.idProductoDevuelto,
         },
       });
-      cantidadYaDevueltaMilesimas =
-        acumulado._sum.cantidadDevuelta === null ? 0 : aMilesimas(acumulado._sum.cantidadDevuelta);
+      cantidadYaDevuelta = acumulado._sum.cantidadDevuelta === null ? new Decimal(0) : aDecimal(acumulado._sum.cantidadDevuelta);
     }
 
     // El medio se lee siempre que venga: el cálculo decide si hace falta (con saldo 0 se ignora)
@@ -130,7 +130,7 @@ export async function registrarCambioAtomico(
       devuelto: productos.find((producto) => producto.idProducto === input.idProductoDevuelto) ?? null,
       entregado: productos.find((producto) => producto.idProducto === input.idProductoEntregado) ?? null,
       ventaOriginal,
-      cantidadYaDevueltaMilesimas,
+      cantidadYaDevuelta,
       medioPago,
     });
 
@@ -150,12 +150,8 @@ export async function registrarCambioAtomico(
     // Orden fijo por producto: dos cambios simultáneos que comparten productos bloquean las filas
     // en el mismo orden y no se traban entre sí (deadlock)
     const operaciones: OperacionStock[] = [
-      { idProducto: input.idProductoEntregado, tipo: "DESCUENTO", cantidadMilesimas: calculo.cantidadEntregadaMilesimas },
-      {
-        idProducto: calculo.idProductoStockIngresado,
-        tipo: "INGRESO",
-        cantidadMilesimas: calculo.cantidadStockIngresadoMilesimas,
-      },
+      { idProducto: input.idProductoEntregado, tipo: "DESCUENTO", cantidad: calculo.cantidadEntregada },
+      { idProducto: calculo.idProductoStockIngresado, tipo: "INGRESO", cantidad: calculo.cantidadStockIngresado },
     ];
     operaciones.sort(
       (primera, segunda) =>
@@ -164,7 +160,7 @@ export async function registrarCambioAtomico(
     );
 
     for (const operacion of operaciones) {
-      const cantidad = milesimasAString(operacion.cantidadMilesimas);
+      const cantidad = operacion.cantidad.toFixed(3);
       if (operacion.tipo === "DESCUENTO") {
         // Descuento condicionado: solo descuenta si todavía alcanza. Si otra operación consumió el stock
         // entre la lectura y este paso (o nunca alcanzó), count vale 0 y se aborta con 409.
@@ -193,16 +189,16 @@ export async function registrarCambioAtomico(
         idUsuario: input.idUsuario,
         idCaja: caja.idCaja,
         idProductoDevuelto: input.idProductoDevuelto,
-        cantidadDevuelta: milesimasAString(calculo.cantidadDevueltaMilesimas),
+        cantidadDevuelta: calculo.cantidadDevuelta.toFixed(3),
         esBolsaAbierta: input.esBolsaAbierta,
-        precioUnitarioDevuelto: centavosAString(calculo.precioUnitarioDevueltoCentavos),
+        precioUnitarioDevuelto: calculo.precioUnitarioDevuelto.toFixed(2),
         idProductoStockIngresado: calculo.idProductoStockIngresado,
-        cantidadStockIngresado: milesimasAString(calculo.cantidadStockIngresadoMilesimas),
+        cantidadStockIngresado: calculo.cantidadStockIngresado.toFixed(3),
         idProductoEntregado: input.idProductoEntregado,
-        cantidadEntregada: milesimasAString(calculo.cantidadEntregadaMilesimas),
-        precioUnitarioEntregado: centavosAString(calculo.precioUnitarioEntregadoCentavos),
-        costoUnitarioCongeladoEntregado: centavosAString(calculo.costoUnitarioEntregadoCentavos),
-        saldoResultante: centavosAString(calculo.saldoCentavos),
+        cantidadEntregada: calculo.cantidadEntregada.toFixed(3),
+        precioUnitarioEntregado: calculo.precioUnitarioEntregado.toFixed(2),
+        costoUnitarioCongeladoEntregado: calculo.costoUnitarioEntregado.toFixed(2),
+        saldoResultante: calculo.saldo.toFixed(2),
         idMedioPago: calculo.idMedioPago,
       },
       select: { idCambio: true, fechaHora: true },
@@ -250,8 +246,8 @@ async function leerVentaOriginal(transaccion: ClienteTransaccion, idVenta: numbe
     estado: venta.estado,
     detalles: venta.detalles.map((detalle) => ({
       idProducto: detalle.idProducto,
-      cantidadMilesimas: aMilesimas(detalle.cantidad),
-      precioUnitarioCentavos: aCentavos(detalle.precioUnitarioVigente),
+      cantidad: aDecimal(detalle.cantidad),
+      precioUnitario: aDecimal(detalle.precioUnitarioVigente),
     })),
   };
 }
@@ -360,48 +356,17 @@ export async function buscarHistorialCambios(
       idProductoDevuelto: fila.idProductoDevuelto,
       nombreProductoDevuelto: fila.productoDevuelto.nombre,
       formatoVentaProductoDevuelto: fila.productoDevuelto.formatoVenta,
-      cantidadDevueltaMilesimas: aMilesimas(fila.cantidadDevuelta),
+      cantidadDevuelta: aDecimal(fila.cantidadDevuelta),
       esBolsaAbierta: fila.esBolsaAbierta,
-      cantidadStockIngresadoMilesimas: aMilesimasOpcional(fila.cantidadStockIngresado),
+      cantidadStockIngresado: fila.cantidadStockIngresado === null ? null : aDecimal(fila.cantidadStockIngresado),
       idProductoEntregado: fila.idProductoEntregado,
       nombreProductoEntregado: fila.productoEntregado.nombre,
       formatoVentaProductoEntregado: fila.productoEntregado.formatoVenta,
-      cantidadEntregadaMilesimas: aMilesimas(fila.cantidadEntregada),
-      saldoResultanteCentavos: aCentavos(fila.saldoResultante),
+      cantidadEntregada: aDecimal(fila.cantidadEntregada),
+      saldoResultante: aDecimal(fila.saldoResultante),
       idMedioPago: fila.idMedioPago,
       nombreMedioPago: fila.medioPago?.nombre ?? null,
     })),
     totalRegistros,
   };
-}
-
-// --- UTILIDADES ---
-// Copias locales de las de ventas, que no se exportan: se evita tocar ese módulo. Su extracción a `shared` es deuda registrada.
-
-// Conversiones desde Decimal de Prisma a enteros internos
-/** Pesos (decimal de BD) a centavos enteros. */
-function aCentavos(valor: { toNumber(): number }): number {
-  return Math.round(valor.toNumber() * 100);
-}
-
-/** Cantidad (decimal de BD) a milésimas enteras. */
-function aMilesimas(valor: { toNumber(): number }): number {
-  return Math.round(valor.toNumber() * 1000);
-}
-
-/** Igual que `aMilesimas`, pero conserva `null` por si una columna decimal llegara sin valor. */
-function aMilesimasOpcional(valor: { toNumber(): number } | null): number | null {
-  return valor === null ? null : aMilesimas(valor);
-}
-
-// Conversiones desde enteros internos a strings para columnas Decimal
-// Se usan strings para que Prisma reciba el valor exacto, sin pasar por coma flotante
-/** Centavos enteros a texto con 2 decimales. */
-function centavosAString(centavos: number): string {
-  return (centavos / 100).toFixed(2);
-}
-
-/** Milésimas enteras a texto con 3 decimales. */
-function milesimasAString(milesimas: number): string {
-  return (milesimas / 1000).toFixed(3);
 }

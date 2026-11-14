@@ -1,4 +1,5 @@
 import type { z } from "zod";
+import type { Decimal } from "../../shared/decimal.js";
 import type { FormatoVenta, ProductoGranelAsociado } from "../inventario/inventario.types.js";
 import type { PaginacionHistorial } from "../ventas/ventas.types.js";
 import type {
@@ -20,7 +21,7 @@ export type RegistrarCambioInput = RegistrarCambioCuerpo & {
 };
 
 // --- DATOS LEÍDOS DE LA BASE ---
-// Montos en centavos (enteros) y cantidades en milésimas (enteras): así no hay errores de coma flotante.
+// Montos y cantidades como Decimal exacto (nunca `number`): así no hay errores de coma flotante.
 
 /** Producto granel asociado a un producto por unidad, con su id para saber a quién ingresa el stock. */
 export type ProductoGranelParaCambio = ProductoGranelAsociado & {
@@ -34,12 +35,12 @@ export type ProductoParaCambio = {
   /** UNIDAD solo admite cantidades enteras; GRANEL admite decimales. */
   formatoVenta: FormatoVenta;
   activo: boolean;
-  /** Precio de venta actual, en centavos. */
-  precioCentavos: number;
-  /** Costo actual, en centavos. Se congela en el cambio solo si el producto es el entregado. */
-  costoCentavos: number;
-  /** Kilos por unidad, en milésimas; nulo si no está cargado. */
-  pesoUnitarioMilesimas: number | null;
+  /** Precio de venta actual, en pesos. */
+  precioVenta: Decimal;
+  /** Costo actual, en pesos. Se congela en el cambio solo si el producto es el entregado. */
+  costoActual: Decimal;
+  /** Kilos por unidad; nulo si no está cargado. */
+  pesoUnitario: Decimal | null;
   /** Producto GRANEL asociado; nulo si el producto no lo tiene. */
   productoGranel: ProductoGranelParaCambio | null;
 };
@@ -50,10 +51,10 @@ export type EstadoVentaOriginal = "COMPLETADA" | "PENDIENTE_PAGO" | "ANULADA";
 /** Un detalle de la venta original: lo necesario para validar la cantidad y tomar el precio vendido. */
 export type DetalleVentaLeido = {
   idProducto: number;
-  /** Cantidad vendida, en milésimas. */
-  cantidadMilesimas: number;
-  /** Precio unitario congelado en la venta, en centavos. */
-  precioUnitarioCentavos: number;
+  /** Cantidad vendida. */
+  cantidad: Decimal;
+  /** Precio unitario congelado en la venta, en pesos. */
+  precioUnitario: Decimal;
 };
 
 /** Venta original leída para vincular un cambio, con sus detalles ordenados por `idDetalle`. */
@@ -78,8 +79,8 @@ export type LecturaCambio = {
   devuelto: ProductoParaCambio | null;
   entregado: ProductoParaCambio | null;
   ventaOriginal: VentaOriginalLeida | null;
-  /** Suma de lo devuelto en cambios ACTIVO de esa venta y ese producto, en milésimas; 0 si no hay ticket. */
-  cantidadYaDevueltaMilesimas: number;
+  /** Suma de lo devuelto en cambios ACTIVO de esa venta y ese producto; 0 si no hay ticket. */
+  cantidadYaDevuelta: Decimal;
   medioPago: MedioPagoParaCambio | null;
 };
 
@@ -87,17 +88,17 @@ export type LecturaCambio = {
 
 /** Resultado completo de `calcularCambio`, listo para persistir. */
 export type CambioCalculado = {
-  cantidadDevueltaMilesimas: number;
+  cantidadDevuelta: Decimal;
   /** Producto que recibe el ingreso: el mismo devuelto, o su granel si es bolsa abierta. */
   idProductoStockIngresado: number;
   /** Unidades del producto ingresado, o kilos si ingresa a granel. */
-  cantidadStockIngresadoMilesimas: number;
-  precioUnitarioDevueltoCentavos: number;
-  cantidadEntregadaMilesimas: number;
-  precioUnitarioEntregadoCentavos: number;
-  costoUnitarioEntregadoCentavos: number;
+  cantidadStockIngresado: Decimal;
+  precioUnitarioDevuelto: Decimal;
+  cantidadEntregada: Decimal;
+  precioUnitarioEntregado: Decimal;
+  costoUnitarioEntregado: Decimal;
   /** Diferencia a favor del local: nunca negativa (no hay reembolsos). */
-  saldoCentavos: number;
+  saldo: Decimal;
   /** Nulo si el saldo es 0. */
   idMedioPago: number | null;
 };
@@ -165,7 +166,7 @@ export type FiltroHistorialCambios = {
 };
 
 // --- HISTORIAL DE CAMBIOS: DATOS DE LA BASE ---
-// Cantidades en milésimas y saldo en centavos (enteros), como el resto del módulo.
+// Cantidades y saldo como Decimal exacto, como el resto del módulo.
 
 /** Fila del historial tal como la entrega el repositorio: solo las columnas de la grilla. */
 export type FilaHistorialCambio = {
@@ -179,18 +180,18 @@ export type FilaHistorialCambio = {
   /** Nombre vigente del producto (no se congela en el cambio). */
   nombreProductoDevuelto: string;
   formatoVentaProductoDevuelto: FormatoVenta;
-  cantidadDevueltaMilesimas: number;
+  cantidadDevuelta: Decimal;
   esBolsaAbierta: boolean;
   /**
-   * Lo que entró al stock, en milésimas: unidades si no es bolsa abierta (el alta guarda la cantidad devuelta) o kilos si lo es.
+   * Lo que entró al stock: unidades si no es bolsa abierta (el alta guarda la cantidad devuelta) o kilos si lo es.
    * Se tipa con nulo por defensa: la columna es NOT NULL, así que hoy el repositorio siempre entrega un número.
    */
-  cantidadStockIngresadoMilesimas: number | null;
+  cantidadStockIngresado: Decimal | null;
   idProductoEntregado: number;
   nombreProductoEntregado: string;
   formatoVentaProductoEntregado: FormatoVenta;
-  cantidadEntregadaMilesimas: number;
-  saldoResultanteCentavos: number;
+  cantidadEntregada: Decimal;
+  saldoResultante: Decimal;
   idMedioPago: number | null;
   /** Nombre vigente del medio de pago; nulo si el cambio no tuvo saldo. */
   nombreMedioPago: string | null;

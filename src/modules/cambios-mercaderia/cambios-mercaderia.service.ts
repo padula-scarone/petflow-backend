@@ -1,3 +1,4 @@
+import { aDecimal, Decimal, redondearACantidad, redondearAMoneda } from "../../shared/decimal.js";
 import { evaluarBolsaAbierta } from "../inventario/inventario.service.js";
 import { crearErrorNegocio } from "../ventas/ventas.errors.js";
 import {
@@ -35,11 +36,11 @@ import type {
 
 // --- CONSTANTES ---
 
-/** Máximo de una columna decimal(10,3) expresado en milésimas: 9.999.999,999. */
-const MAXIMO_MILESIMAS_COLUMNA = 9_999_999_999;
+/** Máximo de una columna decimal(10,3): 9.999.999,999. */
+const MAXIMO_CANTIDAD_COLUMNA = new Decimal("9999999.999");
 
-/** Máximo de una columna decimal(10,2) expresado en centavos: 99.999.999,99. */
-const MAXIMO_CENTAVOS_COLUMNA = 9_999_999_999;
+/** Máximo de una columna decimal(10,2): 99.999.999,99. */
+const MAXIMO_IMPORTE_COLUMNA = new Decimal("99999999.99");
 
 /** Milisegundos que dura un minuto, para convertir la ventana de modificación a un instante. */
 const MILISEGUNDOS_POR_MINUTO = 60_000;
@@ -60,7 +61,7 @@ export async function registrarCambio(input: RegistrarCambioInput): Promise<Regi
   return {
     exito: true,
     mensaje:
-      cambio.saldoCentavos > 0
+      cambio.saldo.gt(0)
         ? "Cambio registrado, stock actualizado y saldo asentado en caja"
         : "Cambio registrado y stock actualizado",
     cambio: convertirCambioPersistido(cambio),
@@ -100,40 +101,36 @@ export function calcularCambio(input: RegistrarCambioInput, lectura: LecturaCamb
   if (!entregado.activo) {
     throw crearErrorNegocio(`El producto ${entregado.nombre} está inactivo`, 400);
   }
-  const cantidadDevueltaMilesimas = aMilesimas(input.cantidadDevuelta);
-  const cantidadEntregadaMilesimas = aMilesimas(input.cantidadEntregada);
-  validarCantidadEntera(devuelto, cantidadDevueltaMilesimas);
-  validarCantidadEntera(entregado, cantidadEntregadaMilesimas);
+  // La BD guarda 3 decimales: se normaliza la cantidad igual que lo hacía el redondeo a milésimas
+  const cantidadDevuelta = redondearACantidad(aDecimal(input.cantidadDevuelta));
+  const cantidadEntregada = redondearACantidad(aDecimal(input.cantidadEntregada));
+  validarCantidadEntera(devuelto, cantidadDevuelta);
+  validarCantidadEntera(entregado, cantidadEntregada);
 
   // --- INGRESO AL STOCK ---
-  const ingreso = calcularIngresoAlStock(input, devuelto, cantidadDevueltaMilesimas);
+  const ingreso = calcularIngresoAlStock(input, devuelto, cantidadDevuelta);
 
   // --- VÍNCULO CON LA VENTA ORIGINAL ---
   // Con ticket, el devuelto vale lo que se pagó por él; sin ticket, su precio actual
-  const precioUnitarioDevueltoCentavos =
+  const precioUnitarioDevuelto =
     ventaOriginal === null
-      ? devuelto.precioCentavos
-      : validarVentaOriginal(ventaOriginal, devuelto.idProducto, cantidadDevueltaMilesimas, lectura.cantidadYaDevueltaMilesimas);
+      ? devuelto.precioVenta
+      : validarVentaOriginal(ventaOriginal, devuelto.idProducto, cantidadDevuelta, lectura.cantidadYaDevuelta);
 
   // --- SALDO Y MEDIO DE PAGO ---
-  const saldoCentavos = calcularSaldo(
-    precioUnitarioDevueltoCentavos,
-    cantidadDevueltaMilesimas,
-    entregado.precioCentavos,
-    cantidadEntregadaMilesimas,
-  );
-  const idMedioPago = resolverMedioPago(input, lectura, saldoCentavos);
+  const saldo = calcularSaldo(precioUnitarioDevuelto, cantidadDevuelta, entregado.precioVenta, cantidadEntregada);
+  const idMedioPago = resolverMedioPago(input, lectura, saldo);
 
   return {
-    cantidadDevueltaMilesimas,
+    cantidadDevuelta,
     idProductoStockIngresado: ingreso.idProductoStockIngresado,
-    cantidadStockIngresadoMilesimas: ingreso.cantidadStockIngresadoMilesimas,
-    precioUnitarioDevueltoCentavos,
-    cantidadEntregadaMilesimas,
-    precioUnitarioEntregadoCentavos: entregado.precioCentavos,
+    cantidadStockIngresado: ingreso.cantidadStockIngresado,
+    precioUnitarioDevuelto,
+    cantidadEntregada,
+    precioUnitarioEntregado: entregado.precioVenta,
     // El costo se congela del entregado; el del devuelto no se guarda (el modelo no tiene dónde)
-    costoUnitarioEntregadoCentavos: entregado.costoCentavos,
-    saldoCentavos,
+    costoUnitarioEntregado: entregado.costoActual,
+    saldo,
     idMedioPago,
   };
 }
@@ -144,8 +141,8 @@ export function calcularCambio(input: RegistrarCambioInput, lectura: LecturaCamb
  * Exige cantidad entera a un producto por unidad (1.5 bolsas no tiene sentido).
  * @throws {ErrorNegocio} 400 si el producto es UNIDAD y la cantidad tiene decimales.
  */
-function validarCantidadEntera(producto: ProductoParaCambio, cantidadMilesimas: number): void {
-  if (producto.formatoVenta === "UNIDAD" && cantidadMilesimas % 1000 !== 0) {
+function validarCantidadEntera(producto: ProductoParaCambio, cantidad: Decimal): void {
+  if (producto.formatoVenta === "UNIDAD" && !cantidad.isInteger()) {
     throw crearErrorNegocio(`El producto ${producto.nombre} se vende por unidad: la cantidad debe ser entera`, 400);
   }
 }
@@ -159,49 +156,46 @@ function validarCantidadEntera(producto: ProductoParaCambio, cantidadMilesimas: 
 function calcularIngresoAlStock(
   input: RegistrarCambioInput,
   devuelto: ProductoParaCambio,
-  cantidadDevueltaMilesimas: number,
-): Pick<CambioCalculado, "idProductoStockIngresado" | "cantidadStockIngresadoMilesimas"> {
+  cantidadDevuelta: Decimal,
+): Pick<CambioCalculado, "idProductoStockIngresado" | "cantidadStockIngresado"> {
   if (!input.esBolsaAbierta) {
-    return { idProductoStockIngresado: devuelto.idProducto, cantidadStockIngresadoMilesimas: cantidadDevueltaMilesimas };
+    return { idProductoStockIngresado: devuelto.idProducto, cantidadStockIngresado: cantidadDevuelta };
   }
 
   // La misma regla que decide `permiteBolsaAbierta` en el catálogo: así no pueden divergir
   const motivo = evaluarBolsaAbierta({
     formatoVenta: devuelto.formatoVenta,
-    pesoUnitarioMilesimas: devuelto.pesoUnitarioMilesimas,
+    // Solo decide si el peso está cargado y es positivo; el cálculo posterior usa el Decimal exacto
+    pesoUnitarioMilesimas: devuelto.pesoUnitario === null ? null : devuelto.pesoUnitario.mul(1000).toNumber(),
     productoGranel: devuelto.productoGranel,
   });
-  const { productoGranel, pesoUnitarioMilesimas } = devuelto;
+  const { productoGranel, pesoUnitario } = devuelto;
   // Las comprobaciones de nulo son inalcanzables si `motivo` es nulo; sirven para que TypeScript lo sepa
-  if (motivo !== null || productoGranel === null || pesoUnitarioMilesimas === null) {
+  if (motivo !== null || productoGranel === null || pesoUnitario === null) {
     throw crearErrorBolsaAbiertaNoPermitida(devuelto.nombre, motivo ?? "no tiene producto a granel o peso cargado");
   }
 
-  // Producto UNIDAD ya validado como entero: la cantidad son bolsas completas.
-  // Se compara antes de multiplicar para no operar con un producto fuera del rango de enteros seguros
-  const cantidadBolsas = cantidadDevueltaMilesimas / 1000;
-  if (cantidadBolsas > Math.floor(MAXIMO_MILESIMAS_COLUMNA / pesoUnitarioMilesimas)) {
+  // Producto UNIDAD ya validado como entero: la cantidad son bolsas completas
+  const cantidadStockIngresado = cantidadDevuelta.mul(pesoUnitario);
+  if (cantidadStockIngresado.gt(MAXIMO_CANTIDAD_COLUMNA)) {
     throw crearErrorValorExcedeMaximo("La cantidad que ingresa al granel");
   }
-  return {
-    idProductoStockIngresado: productoGranel.idProducto,
-    cantidadStockIngresadoMilesimas: cantidadBolsas * pesoUnitarioMilesimas,
-  };
+  return { idProductoStockIngresado: productoGranel.idProducto, cantidadStockIngresado };
 }
 
 /**
  * Valida el vínculo con la venta original y devuelve el precio al que se vendió el producto devuelto.
  * Si el producto figura en más de un detalle (datos antiguos), se suman las cantidades y se toma el precio del primero.
- * @param cantidadYaDevueltaMilesimas Lo devuelto antes en cambios activos de esta venta y este producto.
- * @returns Precio unitario del devuelto en centavos, sin prorratear el descuento manual de la venta.
+ * @param cantidadYaDevuelta Lo devuelto antes en cambios activos de esta venta y este producto.
+ * @returns Precio unitario del devuelto en pesos, sin prorratear el descuento manual de la venta.
  * @throws {ErrorNegocio} Venta anulada o pendiente de pago (409), producto ausente (400) o cantidad excedida (409).
  */
 function validarVentaOriginal(
   ventaOriginal: VentaOriginalLeida,
   idProductoDevuelto: number,
-  cantidadDevueltaMilesimas: number,
-  cantidadYaDevueltaMilesimas: number,
-): number {
+  cantidadDevuelta: Decimal,
+  cantidadYaDevuelta: Decimal,
+): Decimal {
   if (ventaOriginal.estado === "ANULADA") {
     throw crearErrorVentaOriginalAnulada(ventaOriginal.idVenta);
   }
@@ -215,53 +209,48 @@ function validarVentaOriginal(
     throw crearErrorProductoNoFiguraEnVenta(idProductoDevuelto, ventaOriginal.idVenta);
   }
 
-  const cantidadVendidaMilesimas = detallesDelProducto.reduce((suma, detalle) => suma + detalle.cantidadMilesimas, 0);
-  const cantidadDisponibleMilesimas = Math.max(0, cantidadVendidaMilesimas - cantidadYaDevueltaMilesimas);
-  if (cantidadDevueltaMilesimas > cantidadDisponibleMilesimas) {
+  const cantidadVendida = detallesDelProducto.reduce((suma, detalle) => suma.plus(detalle.cantidad), new Decimal(0));
+  const cantidadRestante = cantidadVendida.minus(cantidadYaDevuelta);
+  // Con datos inconsistentes (más devuelto que vendido) lo disponible es 0, nunca negativo
+  const cantidadDisponible = cantidadRestante.isNegative() ? new Decimal(0) : cantidadRestante;
+  if (cantidadDevuelta.gt(cantidadDisponible)) {
     throw crearErrorCantidadExcedeVenta(
       idProductoDevuelto,
       ventaOriginal.idVenta,
-      formatearMilesimas(cantidadDevueltaMilesimas),
-      formatearMilesimas(cantidadDisponibleMilesimas),
+      formatearCantidad(cantidadDevuelta),
+      formatearCantidad(cantidadDisponible),
     );
   }
-  return primerDetalle.precioUnitarioCentavos;
+  return primerDetalle.precioUnitario;
 }
 
 /**
- * Calcula el saldo a favor del local: lo entregado menos lo devuelto, en centavos enteros.
+ * Calcula el saldo a favor del local: lo entregado menos lo devuelto, con Decimal exacto.
  * Cada lado se redondea a centavos por separado, igual que el subtotal de una línea de venta.
  * @throws {ErrorNegocio} 400 si el saldo es negativo (no hay reembolsos) o no entra en su columna.
  */
 function calcularSaldo(
-  precioDevueltoCentavos: number,
-  cantidadDevueltaMilesimas: number,
-  precioEntregadoCentavos: number,
-  cantidadEntregadaMilesimas: number,
-): number {
-  const saldoCentavos =
-    calcularSubtotalCentavos(precioEntregadoCentavos, cantidadEntregadaMilesimas) -
-    calcularSubtotalCentavos(precioDevueltoCentavos, cantidadDevueltaMilesimas);
+  precioDevuelto: Decimal,
+  cantidadDevuelta: Decimal,
+  precioEntregado: Decimal,
+  cantidadEntregada: Decimal,
+): Decimal {
+  const saldo = calcularSubtotal(precioEntregado, cantidadEntregada).minus(
+    calcularSubtotal(precioDevuelto, cantidadDevuelta),
+  );
 
-  if (saldoCentavos < 0) {
-    throw crearErrorSaldoNegativo(formatearCentavos(saldoCentavos));
+  if (saldo.lt(0)) {
+    throw crearErrorSaldoNegativo(saldo.toFixed(2));
   }
-  if (saldoCentavos > MAXIMO_CENTAVOS_COLUMNA) {
+  if (saldo.gt(MAXIMO_IMPORTE_COLUMNA)) {
     throw crearErrorValorExcedeMaximo("El saldo");
   }
-  return saldoCentavos;
+  return saldo;
 }
 
-/**
- * Precio unitario × cantidad, redondeado a centavos.
- * @throws {ErrorNegocio} 400 si el importe es tan grande que precio × cantidad deja de ser un entero seguro de JS.
- */
-function calcularSubtotalCentavos(precioUnitarioCentavos: number, cantidadMilesimas: number): number {
-  const producto = precioUnitarioCentavos * cantidadMilesimas;
-  if (!Number.isSafeInteger(producto)) {
-    throw crearErrorValorExcedeMaximo("El importe del cambio");
-  }
-  return Math.round(producto / 1000);
+/** Precio unitario × cantidad, redondeado a centavos. El producto es exacto: no hay desborde posible. */
+function calcularSubtotal(precioUnitario: Decimal, cantidad: Decimal): Decimal {
+  return redondearAMoneda(precioUnitario.mul(cantidad));
 }
 
 /**
@@ -269,12 +258,12 @@ function calcularSubtotalCentavos(precioUnitarioCentavos: number, cantidadMilesi
  * Con saldo mayor a 0 el medio es obligatorio, debe existir y estar activo. No hay recargo, descuento ni vuelto.
  * @throws {ErrorNegocio} 400 si falta o está inactivo; 404 si no existe.
  */
-function resolverMedioPago(input: RegistrarCambioInput, lectura: LecturaCambio, saldoCentavos: number): number | null {
-  if (saldoCentavos === 0) {
+function resolverMedioPago(input: RegistrarCambioInput, lectura: LecturaCambio, saldo: Decimal): number | null {
+  if (saldo.isZero()) {
     return null;
   }
   if (input.idMedioPago === undefined) {
-    throw crearErrorMedioPagoRequerido(formatearCentavos(saldoCentavos));
+    throw crearErrorMedioPagoRequerido(saldo.toFixed(2));
   }
   if (lectura.medioPago === null) {
     throw crearErrorNegocio(`El medio de pago ${input.idMedioPago} no existe`, 404);
@@ -295,15 +284,15 @@ function convertirCambioPersistido(cambio: CambioPersistido): RegistrarCambioRes
     estado: "ACTIVO",
     idVentaOriginal: cambio.idVentaOriginal,
     idProductoDevuelto: cambio.idProductoDevuelto,
-    cantidadDevuelta: formatearMilesimas(cambio.cantidadDevueltaMilesimas),
+    cantidadDevuelta: formatearCantidad(cambio.cantidadDevuelta),
     esBolsaAbierta: cambio.esBolsaAbierta,
-    precioUnitarioDevuelto: formatearCentavos(cambio.precioUnitarioDevueltoCentavos),
+    precioUnitarioDevuelto: formatearImporte(cambio.precioUnitarioDevuelto),
     idProductoStockIngresado: cambio.idProductoStockIngresado,
-    cantidadStockIngresado: formatearMilesimas(cambio.cantidadStockIngresadoMilesimas),
+    cantidadStockIngresado: formatearCantidad(cambio.cantidadStockIngresado),
     idProductoEntregado: cambio.idProductoEntregado,
-    cantidadEntregada: formatearMilesimas(cambio.cantidadEntregadaMilesimas),
-    precioUnitarioEntregado: formatearCentavos(cambio.precioUnitarioEntregadoCentavos),
-    saldoResultante: formatearCentavos(cambio.saldoCentavos),
+    cantidadEntregada: formatearCantidad(cambio.cantidadEntregada),
+    precioUnitarioEntregado: formatearImporte(cambio.precioUnitarioEntregado),
+    saldoResultante: formatearImporte(cambio.saldo),
     idMedioPago: cambio.idMedioPago,
   };
 }
@@ -386,43 +375,35 @@ function convertirFilaHistorialCambio(fila: FilaHistorialCambio): CambioHistoria
     idProductoDevuelto: fila.idProductoDevuelto,
     nombreProductoDevuelto: fila.nombreProductoDevuelto,
     formatoVentaProductoDevuelto: fila.formatoVentaProductoDevuelto,
-    cantidadDevuelta: formatearMilesimas(fila.cantidadDevueltaMilesimas),
+    cantidadDevuelta: formatearCantidad(fila.cantidadDevuelta),
     esBolsaAbierta: fila.esBolsaAbierta,
     // Sin bolsa abierta el alta guarda aquí las unidades devueltas, que ya figuran en `cantidadDevuelta`: no se repiten
     cantidadStockIngresado:
-      fila.esBolsaAbierta && fila.cantidadStockIngresadoMilesimas !== null
-        ? formatearMilesimas(fila.cantidadStockIngresadoMilesimas)
-        : null,
+      fila.esBolsaAbierta && fila.cantidadStockIngresado !== null ? formatearCantidad(fila.cantidadStockIngresado) : null,
     idProductoEntregado: fila.idProductoEntregado,
     nombreProductoEntregado: fila.nombreProductoEntregado,
     formatoVentaProductoEntregado: fila.formatoVentaProductoEntregado,
-    cantidadEntregada: formatearMilesimas(fila.cantidadEntregadaMilesimas),
-    saldoResultante: formatearCentavos(fila.saldoResultanteCentavos),
+    cantidadEntregada: formatearCantidad(fila.cantidadEntregada),
+    saldoResultante: formatearImporte(fila.saldoResultante),
     idMedioPago: fila.idMedioPago,
     nombreMedioPago: fila.nombreMedioPago,
   };
 }
 
 // --- UTILIDADES DE MONEDA Y CANTIDAD ---
-// Copias locales de las de ventas, que no se exportan: se evita tocar ese módulo. Su extracción a `shared` es deuda registrada.
 
 /**
- * Convierte centavos enteros a texto con 2 decimales.
- * @example formatearCentavos(150000) // "1500.00"
+ * Convierte un importe a texto con 2 decimales.
+ * @example formatearImporte(new Decimal("1500")) // "1500.00"
  */
-function formatearCentavos(centavos: number): string {
-  return (centavos / 100).toFixed(2);
+function formatearImporte(importe: Decimal): string {
+  return importe.toFixed(2);
 }
 
 /**
- * Convierte milésimas enteras a texto con 3 decimales.
- * @example formatearMilesimas(1875) // "1.875"
+ * Convierte una cantidad o un peso a texto con 3 decimales.
+ * @example formatearCantidad(new Decimal("1.875")) // "1.875"
  */
-function formatearMilesimas(milesimas: number): string {
-  return (milesimas / 1000).toFixed(3);
-}
-
-/** Convierte una cantidad decimal a milésimas enteras (la BD guarda 3 decimales). */
-function aMilesimas(cantidad: number): number {
-  return Math.round(cantidad * 1000);
+function formatearCantidad(cantidad: Decimal): string {
+  return cantidad.toFixed(3);
 }
