@@ -97,6 +97,7 @@ model Usuario {
   ventas       Venta[]
   ventasAnuladas Venta[] @relation("VentaUsuarioAnulacion")
   cambios      CambioMercaderia[]
+  cambiosAnulados CambioMercaderia[] @relation("CambioUsuarioAnulacion")
 
   @@map("usuarios")
 }
@@ -290,8 +291,20 @@ model CambioMercaderia {
   idMedioPago                     Int?         @map("id_medio_pago")
   estado                          EstadoCambio @default(ACTIVO)
 
+  // Texto que arma el front a partir del motivo elegido; nulo en cambios anteriores a este registro
+  motivoCambio                    String?      @map("motivo_cambio") @db.VarChar(200)
+  // Cobro del saldo en efectivo: nulos si no hubo saldo, si el medio no es efectivo o si no se informo el recibido
+  montoRecibido                   Decimal?     @map("monto_recibido") @db.Decimal(12, 2)
+  vuelto                          Decimal?     @db.Decimal(12, 2)
+  // Auditoria de la anulacion: nulos mientras el cambio no esta ANULADO
+  fechaHoraAnulacion              DateTime?    @map("fecha_hora_anulacion") @db.Timestamptz(6)
+  idUsuarioAnulacion              Int?         @map("id_usuario_anulacion")
+  motivoAnulacion                 String?      @map("motivo_anulacion") @db.VarChar(200)
+
   ventaOriginal     Venta?      @relation(fields: [idVentaOriginal], references: [idVenta])
   usuario           Usuario     @relation(fields: [idUsuario], references: [idUsuario])
+  // Quien anulo el cambio (puede ser distinto del vendedor). Replica el nombre de FK que ya existe en la base
+  usuarioAnulacion  Usuario?    @relation("CambioUsuarioAnulacion", fields: [idUsuarioAnulacion], references: [idUsuario], onDelete: SetNull, onUpdate: Cascade, map: "cambios_mercaderia_id_usuario_anulacion_fkey")
   caja              SesionCaja  @relation(fields: [idCaja], references: [idCaja])
   productoDevuelto  Producto    @relation("CambioProductoDevuelto", fields: [idProductoDevuelto], references: [idProducto])
   productoStockIngresado Producto @relation("CambioProductoStockIngresado", fields: [idProductoStockIngresado], references: [idProducto])
