@@ -1,5 +1,6 @@
 import { z } from "zod";
 import {
+  anularVentaCuerpoSchema,
   CANTIDAD_POR_PAGINA_MAXIMA,
   CANTIDAD_POR_PAGINA_PREDETERMINADA,
   enteroDesdeTexto,
@@ -155,3 +156,20 @@ export const ID_CAMBIO_MAXIMO = 2_147_483_647;
 export const consultarCambioSchema = z.object({
   idCambio: enteroDesdeTexto(1, ID_CAMBIO_MAXIMO),
 });
+
+// --- ANULACIÓN DE UN CAMBIO ---
+
+/**
+ * Contrato de entrada del parámetro de ruta de `POST /api/cambios-mercaderia/:idCambio/anulacion`.
+ * Reutiliza el esquema del detalle (entero positivo hasta `ID_CAMBIO_MAXIMO`, conversión estricta) en lugar de
+ * declarar uno idéntico: así el tope del id no puede divergir entre rutas.
+ */
+export const anularCambioParametrosSchema = consultarCambioSchema;
+
+/**
+ * Contrato de entrada del body de `POST /api/cambios-mercaderia/:idCambio/anulacion`: `{ motivo }` obligatorio,
+ * de 1 a 200 caracteres tras recortar. Es el mismo esquema que la anulación de ventas (baja y modificación son
+ * una sola operación y no hay un campo que las distinga). Un `idUsuario` en el body se descarta: quien anula
+ * sale siempre del token.
+ */
+export const anularCambioCuerpoSchema = anularVentaCuerpoSchema;

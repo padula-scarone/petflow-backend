@@ -3,6 +3,8 @@ import type { Decimal } from "../../shared/decimal.js";
 import type { FormatoVenta, ProductoGranelAsociado } from "../inventario/inventario.types.js";
 import type { PaginacionHistorial, TipoMedioPago } from "../ventas/ventas.types.js";
 import type {
+  anularCambioCuerpoSchema,
+  anularCambioParametrosSchema,
   consultarCambioSchema,
   consultarHistorialCambiosSchema,
   ESTADOS_CAMBIO_HISTORIAL,
@@ -415,5 +417,68 @@ export type ConsultarCambioResponse = {
   exito: true;
   /** Hora del servidor al responder (ISO 8601): el front la compara con `fechaHoraLimiteModificacion`. */
   fechaHoraServidor: string;
+  cambio: CambioDetalle;
+};
+
+// --- ANULACIÓN DE UN CAMBIO: ENTRADA ---
+
+/** Parámetro de ruta validado de `POST /api/cambios-mercaderia/:idCambio/anulacion`, inferido del esquema Zod. */
+export type AnularCambioParametros = z.infer<typeof anularCambioParametrosSchema>;
+
+/** Body validado de `POST /api/cambios-mercaderia/:idCambio/anulacion` (el motivo ya viene recortado), inferido del esquema Zod. */
+export type AnularCambioCuerpo = z.infer<typeof anularCambioCuerpoSchema>;
+
+/** Entrada completa de la anulación: el cambio de la ruta, el motivo del body y quien anula, que viene del token ya verificado. */
+export type AnularCambioInput = AnularCambioParametros &
+  AnularCambioCuerpo & {
+    /** Usuario de la sesión que anula (no necesariamente el vendedor original); nunca se toma del body. */
+    idUsuario: number;
+  };
+
+// --- ANULACIÓN DE UN CAMBIO: DATOS DE LA BASE Y DECISIÓN ---
+
+/** Cambio leído para anularlo: solo lo necesario para validar estado, ventana y caja, y para calcular la reversión del stock. */
+export type CambioAnulable = {
+  idCambio: number;
+  /** Cualquier estado: el service rechaza ANULADO. */
+  estado: EstadoCambioHistorial;
+  /** Origen de la ventana de anulación. */
+  fechaHora: Date;
+  /** Si es mayor a 0, el cambio cobró saldo y su anulación exige una caja abierta. */
+  saldoResultante: Decimal;
+  /** Producto entregado al cliente: la anulación le repone lo entregado. */
+  productoEntregado: { idProducto: number; nombre: string; cantidadEntregada: Decimal };
+  /** Producto que recibió el stock (el devuelto, o su granel si fue bolsa abierta): la anulación le descuenta lo que ingresó. */
+  productoStockIngresado: { idProducto: number; nombre: string; cantidadStockIngresado: Decimal };
+};
+
+/** Movimiento de stock de la reversión: reponer lo entregado o descontar lo que ingresó. */
+export type OperacionReversionStock = {
+  idProducto: number;
+  nombreProducto: string;
+  tipo: "REPOSICION" | "DESCUENTO";
+  /** Cantidad a mover: unidades, o kilos si el producto es el granel de una bolsa abierta. */
+  cantidad: Decimal;
+};
+
+/** Resultado de `evaluarAnulacionCambio`: el cambio se puede anular y estos son los datos para transicionarlo y revertir el stock. */
+export type DecisionAnulacionCambio = {
+  /** Instante mínimo vigente: la `fechaHora` del cambio debe ser mayor o igual a este valor. */
+  limiteVentana: Date;
+  /** Instante de la anulación: el mismo `ahora` de la evaluación, para que ventana y auditoría usen un único reloj. */
+  fechaHoraAnulacion: Date;
+  /** Movimientos de stock ya en el orden en que deben aplicarse (ver `calcularReversionStock`). */
+  operaciones: OperacionReversionStock[];
+};
+
+// --- ANULACIÓN DE UN CAMBIO: RESPUESTA HTTP ---
+
+/** Respuesta exitosa de `POST /api/cambios-mercaderia/:idCambio/anulacion`. */
+export type AnularCambioResponse = {
+  exito: true;
+  mensaje: string;
+  /** Hora del servidor al responder (ISO 8601). */
+  fechaHoraServidor: string;
+  /** El mismo contenido que `GET /api/cambios-mercaderia/:idCambio`, ya con estado ANULADO y `anulacion` completa. */
   cambio: CambioDetalle;
 };

@@ -3,11 +3,18 @@ import type { SesionAutenticada } from "../auth/auth.types.js";
 import { esErrorNegocio } from "../ventas/ventas.errors.js";
 import { esErrorNegocioCambio } from "./cambios-mercaderia.errors.js";
 import {
+  anularCambioCuerpoSchema,
+  anularCambioParametrosSchema,
   consultarCambioSchema,
   consultarHistorialCambiosSchema,
   registrarCambioSchema,
 } from "./cambios-mercaderia.schemas.js";
-import { consultarCambio, consultarHistorialCambios, registrarCambio } from "./cambios-mercaderia.service.js";
+import {
+  anularCambio,
+  consultarCambio,
+  consultarHistorialCambios,
+  registrarCambio,
+} from "./cambios-mercaderia.service.js";
 
 // --- FUNCIONES AUXILIARES ---
 
@@ -143,6 +150,49 @@ export async function getConsultarCambio(req: Request, res: Response): Promise<v
     res.status(200).json(resultado);
   } catch (errorCapturado) {
     // Los errores de negocio (objetos puros) se traducen; cualquier otro valor sube a Express
+    if (responderErrorNegocio(res, errorCapturado)) {
+      return;
+    }
+    throw errorCapturado;
+  }
+}
+
+/**
+ * Handler de `POST /api/cambios-mercaderia/:idCambio/anulacion`: anula un cambio y revierte su stock (baja y modificación).
+ * Valida el parámetro de ruta y el body (el motivo es obligatorio) y delega en el service. No contiene reglas de negocio.
+ * La sesión y el rol los exige `requerirRol` en la ruta, no este handler.
+ * Quien anula es el usuario del token (`res.locals.sesion`); un `idUsuario` en el body se ignora.
+ * Respuestas: 200 si se anula; 400 con detalle por campo si `idCambio` o el motivo son inválidos; 403 si venció la ventana de tiempo;
+ * 404 si el cambio no existe; 409 si ya está anulado (o lo anuló otra operación a la vez), tuvo saldo cobrado y no hay caja abierta,
+ * o no alcanza el stock para revertir. Todo error de negocio o de validación trae además `codigo`.
+ */
+export async function postAnularCambio(req: Request, res: Response): Promise<void> {
+  // El parámetro de ruta llega como texto: el esquema lo convierte de forma estricta
+  const parseoParametros = anularCambioParametrosSchema.safeParse(req.params);
+  if (!parseoParametros.success) {
+    res
+      .status(400)
+      .json(construirRespuestaValidacionConCodigo("Parámetros de ruta inválidos", parseoParametros.error.issues));
+    return;
+  }
+
+  // En Express 5 un POST sin body deja `req.body` en undefined: se trata como objeto vacío para que el error
+  // salga con el campo "motivo" y no con un campo vacío. Un body que no es objeto (por ejemplo un arreglo) sigue dando 400
+  const parseoCuerpo = anularCambioCuerpoSchema.safeParse(req.body ?? {});
+  if (!parseoCuerpo.success) {
+    res.status(400).json(construirRespuestaValidacionConCodigo("Datos de anulación inválidos", parseoCuerpo.error.issues));
+    return;
+  }
+
+  // La sesión ya fue verificada por requerirRol: aquí solo se lee para identificar a quien anula
+  const sesion = res.locals.sesion as SesionAutenticada;
+
+  try {
+    const resultado = await anularCambio({ ...parseoParametros.data, ...parseoCuerpo.data, idUsuario: sesion.idUsuario });
+    res.status(200).json(resultado);
+  } catch (errorCapturado) {
+    // Los errores de negocio (objetos puros, incluido el 403 de ventana vencida) se traducen;
+    // cualquier otro valor sube a Express
     if (responderErrorNegocio(res, errorCapturado)) {
       return;
     }

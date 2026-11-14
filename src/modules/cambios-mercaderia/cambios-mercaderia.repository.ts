@@ -1,11 +1,19 @@
 import type { Prisma } from "../../generated/prisma/client.js";
 import { aDecimal, Decimal } from "../../shared/decimal.js";
 import { prisma } from "../../shared/prisma.js";
-import { crearErrorSinCajaParaCambio, crearErrorStockInsuficienteCambio } from "./cambios-mercaderia.errors.js";
+import {
+  crearErrorCambioYaAnulado,
+  crearErrorSinCajaParaCambio,
+  crearErrorStockInsuficienteCambio,
+  crearErrorStockInsuficienteParaRevertir,
+} from "./cambios-mercaderia.errors.js";
 import type {
+  AnularCambioInput,
+  CambioAnulable,
   CambioCalculado,
   CambioDetalleLeido,
   CambioPersistido,
+  DecisionAnulacionCambio,
   FiltroHistorialCambios,
   LecturaCambio,
   MedioPagoParaCambio,
@@ -20,6 +28,9 @@ import type {
 
 /** Función de cálculo que inyecta el service; recibe lo leído de la BD y devuelve el cambio calculado o lanza el error de negocio. */
 type CalcularCambio = (lectura: LecturaCambio) => CambioCalculado;
+
+/** Función de evaluación que inyecta el service; recibe el cambio leído y si hay caja abierta, y devuelve la decisión o lanza el error de negocio. */
+type EvaluarAnulacionCambio = (cambio: CambioAnulable | null, hayCajaAbierta: boolean) => DecisionAnulacionCambio;
 
 /** Una escritura de stock del cambio: descontar lo entregado o ingresar lo devuelto. */
 type OperacionStock = {
@@ -231,6 +242,138 @@ export async function registrarCambioAtomico(
       },
       detalle,
     };
+  });
+}
+
+// --- ANULACIÓN DE CAMBIO ---
+
+/**
+ * Anula un cambio de mercadería y revierte su stock en una única transacción.
+ * Es la única capa que toca Prisma en esta acción. Si algo falla (cambio, ventana, caja, carrera, stock, BD)
+ * se revierte todo: no queda el cambio anulado con el stock a medio revertir ni stock revertido sin anular.
+ * Usa el nivel de aislamiento predeterminado (READ COMMITTED) a propósito: ante dos anulaciones simultáneas del
+ * mismo cambio, la segunda espera el bloqueo de fila de la primera y luego ve el estado ya cambiado (409),
+ * sin error de serialización.
+ * Baja lógica: no se borra ni se edita ningún pago, precio ni cantidad; la reversión de caja es pasar a ANULADO
+ * (no se toca `saldoActual`: el saldo del cambio deja de contar por su estado, igual que en la Baja Venta).
+ * La auditoría (fecha, usuario y motivo) se escribe en el mismo UPDATE que el estado.
+ * La relectura va antes de confirmar: lo que se responde es exactamente lo que quedó guardado.
+ * @param input Parámetro de ruta, motivo validado y usuario del token.
+ * @param evaluar Evaluación de negocio, ejecutada dentro de la transacción con datos recién leídos.
+ * @returns El cambio releído (detalle completo, ya ANULADO).
+ * @throws {ErrorNegocioCambio} Las de la evaluación (404/409/403/409), una anulación simultánea que ganó antes (409)
+ * o el stock que no alcanza para revertir (409). Se lanza como objeto puro, no como Error.
+ */
+export async function anularCambioAtomico(
+  input: AnularCambioInput,
+  evaluar: EvaluarAnulacionCambio,
+): Promise<CambioDetalleLeido> {
+  return prisma.$transaction(async (transaccion) => {
+    // --- LECTURA Y EVALUACIÓN ---
+    const cambioLeido = await transaccion.cambioMercaderia.findUnique({
+      where: { idCambio: input.idCambio },
+      select: {
+        idCambio: true,
+        estado: true,
+        fechaHora: true,
+        saldoResultante: true,
+        idProductoEntregado: true,
+        cantidadEntregada: true,
+        productoEntregado: { select: { nombre: true } },
+        idProductoStockIngresado: true,
+        cantidadStockIngresado: true,
+        productoStockIngresado: { select: { nombre: true } },
+      },
+    });
+    const cambio: CambioAnulable | null =
+      cambioLeido === null
+        ? null
+        : {
+            idCambio: cambioLeido.idCambio,
+            estado: cambioLeido.estado,
+            fechaHora: cambioLeido.fechaHora,
+            saldoResultante: aDecimal(cambioLeido.saldoResultante),
+            productoEntregado: {
+              idProducto: cambioLeido.idProductoEntregado,
+              nombre: cambioLeido.productoEntregado.nombre,
+              cantidadEntregada: aDecimal(cambioLeido.cantidadEntregada),
+            },
+            productoStockIngresado: {
+              idProducto: cambioLeido.idProductoStockIngresado,
+              nombre: cambioLeido.productoStockIngresado.nombre,
+              cantidadStockIngresado: aDecimal(cambioLeido.cantidadStockIngresado),
+            },
+          };
+
+    // Cualquier caja abierta sirve (no hace falta la del cambio). Se lee siempre y el service decide
+    // si hace falta: así la regla "solo un cambio con saldo cobrado exige caja" queda fuera del repositorio
+    const cajaAbierta = await transaccion.sesionCaja.findFirst({
+      where: { estado: "ABIERTA" },
+      select: { idCaja: true },
+    });
+
+    const decision = evaluar(cambio, cajaAbierta !== null);
+
+    // --- CAMBIO DE ESTADO CONDICIONADO ---
+    // El estado y la ventana se exigen en el where del UPDATE y no en un if después del SELECT:
+    // entre la lectura y la escritura otra transacción pudo anular este cambio, y un if sobre lo leído lo dejaría
+    // pasar dos veces. El UPDATE toma el bloqueo de fila y, si otra transacción lo cambió, vuelve a evaluar el where
+    // sobre la fila nueva: no coincide, count vale 0 y se aborta con 409.
+    const actualizados = await transaccion.cambioMercaderia.updateMany({
+      where: {
+        idCambio: input.idCambio,
+        estado: "ACTIVO",
+        fechaHora: { gte: decision.limiteVentana },
+      },
+      // La auditoría va en el mismo UPDATE que el estado: o se anula con su quién, cuándo y por qué, o no se escribe nada.
+      // Un cambio ya ANULADO nunca coincide con el where, así que su auditoría original no se pisa.
+      // Quien anula sale del token (input.idUsuario), no del vendedor original del cambio.
+      data: {
+        estado: "ANULADO",
+        fechaHoraAnulacion: decision.fechaHoraAnulacion,
+        idUsuarioAnulacion: input.idUsuario,
+        motivoAnulacion: input.motivo,
+      },
+    });
+    if (actualizados.count !== 1) {
+      // El límite de la ventana ya pasó la evaluación y `fechaHora` no cambia: solo pudo cambiar el estado
+      throw crearErrorCambioYaAnulado(input.idCambio);
+    }
+
+    // --- REVERSIÓN DE STOCK ---
+    // Va DESPUÉS de verificar el count: solo la transacción que ganó la transición revierte, así el stock se mueve
+    // una sola vez. Las operaciones vienen ordenadas por producto (y con la reposición primero si es el mismo
+    // producto en ambos lados): ver `calcularReversionStock`.
+    for (const operacion of decision.operaciones) {
+      const cantidad = operacion.cantidad.toFixed(3);
+      if (operacion.tipo === "REPOSICION") {
+        // Incremento atómico en la BD con el decimal exacto: sin pasar por coma flotante ni leer el stock antes
+        await transaccion.producto.update({
+          where: { idProducto: operacion.idProducto },
+          data: { stockFisico: { increment: cantidad } },
+          select: { idProducto: true },
+        });
+      } else {
+        // Descuento condicionado: solo descuenta si todavía alcanza (por ejemplo, el granel de la bolsa abierta ya
+        // se vendió). Si no, count vale 0 y se aborta: el rollback deshace también el cambio de estado y la reposición
+        const descontados = await transaccion.producto.updateMany({
+          where: { idProducto: operacion.idProducto, stockFisico: { gte: cantidad } },
+          data: { stockFisico: { decrement: cantidad } },
+        });
+        if (descontados.count !== 1) {
+          throw crearErrorStockInsuficienteParaRevertir(operacion.nombreProducto, cantidad);
+        }
+      }
+    }
+
+    // --- RELECTURA ---
+    // Dentro de la misma transacción: ve lo que se acaba de escribir y nada puede cambiarlo antes de responder
+    const detalle = await leerDetalleCambio(transaccion, input.idCambio);
+    if (detalle === null) {
+      // Inalcanzable: el cambio existe y esta transacción lo acaba de actualizar. El error revierte todo y sube a Express como 500
+      throw new Error(`No se pudo releer el cambio ${input.idCambio} recién anulado`);
+    }
+    return detalle;
   });
 }
 
