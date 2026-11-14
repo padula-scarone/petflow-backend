@@ -1123,6 +1123,11 @@ const productosConsultados = {
         properties: {
           idProducto: { type: "integer", example: 1 },
           nombre: { type: "string", example: "Alimento balanceado perro adulto 15 kg" },
+          categoria: {
+            type: "string",
+            example: "Alimento balanceado",
+            description: "Nombre vigente de la categoría del producto; siempre tiene valor",
+          },
           precioVenta: { type: "string", example: "45000.00", description: "Texto con 2 decimales" },
           stockFisico: { type: "string", example: "12.000", description: "Texto con 3 decimales" },
           formatoVenta: { type: "string", enum: ["UNIDAD", "GRANEL"], example: "UNIDAD" },
@@ -1154,6 +1159,7 @@ const productosConsultados = {
         required: [
           "idProducto",
           "nombre",
+          "categoria",
           "precioVenta",
           "stockFisico",
           "formatoVenta",
@@ -1280,7 +1286,7 @@ export const openapiDocument = {
         description:
           "Devuelve solo productos con estado ACTIVO, sin filtrar por stock (el alta de venta valida el stock). " +
           "Sin paginación. Orden: nombre ascendente y id ascendente como desempate. Sin coincidencias devuelve 200 con lista vacía. " +
-          "No expone costo, categoría ni código de barras. Cada producto trae `permiteBolsaAbierta`, la misma regla que valida el alta de un cambio, " +
+          "No expone costo ni código de barras. Cada producto trae `categoria` (el nombre vigente de su categoría), `permiteBolsaAbierta`, la misma regla que valida el alta de un cambio, " +
           "y los datos de su granel vinculado (`idProductoGranel`, `nombreProductoGranel`) y `pesoUnitario`, nulos si no aplican. " +
           "Requiere sesión (roles VENDEDOR, GESTOR_COMERCIAL o GERENTE); no exige caja abierta.",
         parameters: [parametroBusqueda],
