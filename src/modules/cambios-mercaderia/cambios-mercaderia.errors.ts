@@ -16,12 +16,15 @@ export const CODIGOS_ERROR_CAMBIO = [
   "STOCK_INSUFICIENTE",
   "VENTA_NO_VINCULABLE",
   "CANTIDAD_EXCEDE_VENTA",
+  "PLAZO_VENCIDO",
+  "CAMBIO_YA_ANULADO",
+  "STOCK_INSUFICIENTE_PARA_REVERTIR",
 ] as const;
 
 /**
  * Código con el que el front distingue el caso de un rechazo sin leer el texto del mensaje.
- * Es el enum `CodigoErrorCambio` del front, sin los valores que corresponden a la anulación y edición de cambios
- * (`PLAZO_VENCIDO`, `CAMBIO_YA_ANULADO`, `STOCK_INSUFICIENTE_PARA_REVERTIR`), que todavía no existen en el back.
+ * Es el enum `CodigoErrorCambio` del front; los tres últimos valores (`PLAZO_VENCIDO`, `CAMBIO_YA_ANULADO` y
+ * `STOCK_INSUFICIENTE_PARA_REVERTIR`) corresponden a la anulación de un cambio (baja y modificación).
  * El enum del front no tiene valores propios para "producto inexistente" ni "medio de pago inexistente":
  * esos 404 salen como `DATOS_INVALIDOS`.
  */
@@ -86,6 +89,58 @@ export function crearErrorSinCajaParaCambio(): ErrorNegocioCambio {
  */
 export function crearErrorStockInsuficienteCambio(idProducto: number): ErrorNegocioCambio {
   return crearErrorNegocioCambio(crearErrorStockInsuficiente(idProducto).mensaje, 409, "STOCK_INSUFICIENTE");
+}
+
+// --- FÁBRICAS: ANULACIÓN ---
+
+/**
+ * Crea el error de anular un cambio que ya está anulado (o que otra anulación simultánea anuló antes).
+ * Usa 409 porque el pedido es válido pero choca con el estado actual del cambio.
+ * @param idCambio Id del cambio ya anulado.
+ */
+export function crearErrorCambioYaAnulado(idCambio: number): ErrorNegocioCambio {
+  return crearErrorNegocioCambio(`El cambio ${idCambio} ya está anulado`, 409, "CAMBIO_YA_ANULADO");
+}
+
+/**
+ * Crea el error de anular un cambio fuera de la ventana permitida.
+ * Usa 403 con mensaje propio de cambios: la acción ya no está permitida para este cambio (no es un problema de rol).
+ * No reutiliza la fábrica de ventas porque su mensaje habla de la venta y no lleva `codigo`.
+ * @param limiteMinutos Minutos de la ventana, para que el mensaje no quede desfasado de la constante.
+ */
+export function crearErrorPlazoVencidoCambio(limiteMinutos: number): ErrorNegocioCambio {
+  return crearErrorNegocioCambio(
+    `No se puede anular ni modificar el cambio: pasaron más de ${limiteMinutos} minutos desde que se registró`,
+    403,
+    "PLAZO_VENCIDO",
+  );
+}
+
+/**
+ * Crea el error de anular un cambio con saldo cobrado cuando no hay ninguna caja abierta.
+ * Usa 409 porque el pedido es válido pero choca con el estado actual de la caja.
+ */
+export function crearErrorSinCajaParaAnularCambio(): ErrorNegocioCambio {
+  return crearErrorNegocioCambio(
+    "No hay una caja abierta para anular un cambio con saldo cobrado",
+    409,
+    "SIN_CAJA_ABIERTA",
+  );
+}
+
+/**
+ * Crea el error de no poder revertir el ingreso al stock de un cambio porque ya no alcanza (por ejemplo, el granel
+ * que entró con una bolsa abierta ya se vendió).
+ * Usa 409 porque el pedido es válido pero choca con el estado actual del inventario.
+ * @param nombreProducto Nombre del producto cuyo stock no alcanza.
+ * @param cantidad Cantidad que había que descontar, ya formateada.
+ */
+export function crearErrorStockInsuficienteParaRevertir(nombreProducto: string, cantidad: string): ErrorNegocioCambio {
+  return crearErrorNegocioCambio(
+    `No se puede revertir el cambio: el stock de ${nombreProducto} no alcanza para descontar ${cantidad}, que ingresaron con él`,
+    409,
+    "STOCK_INSUFICIENTE_PARA_REVERTIR",
+  );
 }
 
 // --- FÁBRICAS: RECURSOS Y DATOS ---

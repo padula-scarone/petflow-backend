@@ -2,6 +2,8 @@ import { z } from "zod";
 import { iniciarSesionSchema } from "../modules/auth/auth.schemas.js";
 import { CODIGOS_ERROR_CAMBIO } from "../modules/cambios-mercaderia/cambios-mercaderia.errors.js";
 import {
+  anularCambioCuerpoSchema,
+  anularCambioParametrosSchema,
   CANTIDAD_MAXIMA,
   consultarCambioSchema,
   consultarHistorialCambiosSchema,
@@ -903,6 +905,65 @@ const cambioConsultado = {
   required: ["exito", "fechaHoraServidor", "cambio"],
 };
 
+// --- ANULACIÓN DE UN CAMBIO ---
+
+/** Error de validación (400) de la anulación de un cambio: `idCambio` o `motivo` inválidos, con su `codigo`. */
+const errorValidacionAnulacionCambio = {
+  ...errorValidacion,
+  properties: {
+    ...errorValidacion.properties,
+    mensaje: { type: "string", example: "Datos de anulación inválidos" },
+    errores: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          campo: { type: "string", example: "motivo" },
+          mensaje: { type: "string", example: "El motivo de la anulación es obligatorio y debe ser texto" },
+        },
+      },
+    },
+    codigo: { type: "string", enum: ["DATOS_INVALIDOS"], example: "DATOS_INVALIDOS" },
+  },
+};
+
+/** Respuesta 403 de negocio de la anulación de un cambio: la ventana de 15 minutos venció. */
+const plazoVencidoCambio = {
+  type: "object",
+  properties: {
+    exito: { type: "boolean", example: false },
+    mensaje: {
+      type: "string",
+      example: "No se puede anular ni modificar el cambio: pasaron más de 15 minutos desde que se registró",
+    },
+    codigo: { type: "string", enum: ["PLAZO_VENCIDO"], example: "PLAZO_VENCIDO" },
+  },
+  required: ["exito", "mensaje", "codigo"],
+};
+
+/** Respuesta exitosa de `POST /api/cambios-mercaderia/{idCambio}/anulacion` (ver `AnularCambioResponse`). */
+const cambioAnulado = {
+  type: "object",
+  properties: {
+    exito: { type: "boolean", example: true },
+    mensaje: {
+      type: "string",
+      example: "Cambio anulado, saldo revertido y stock repuesto",
+      description: "Sin saldo cobrado: \"Cambio anulado y stock repuesto\"",
+    },
+    fechaHoraServidor: { type: "string", format: "date-time", description: "Hora del servidor al responder (ISO 8601)" },
+    cambio: {
+      type: "object",
+      description:
+        "El mismo contenido que `GET /api/cambios-mercaderia/{idCambio}` (releído dentro de la misma transacción de la anulación), " +
+        "ya con `estado` ANULADO, `fechaHoraLimiteModificacion` nulo y `anulacion` completa (fecha, usuario que anuló y motivo)",
+      properties: propiedadesCambioDetalle,
+      required: requeridosCambioDetalle,
+    },
+  },
+  required: ["exito", "mensaje", "fechaHoraServidor", "cambio"],
+};
+
 // --- HISTORIAL DE CAMBIOS ---
 
 /** Respuesta exitosa de `GET /api/cambios-mercaderia` (ver `ConsultarHistorialCambiosResponse`). */
@@ -1038,6 +1099,16 @@ const parametroIdCambio = {
   required: true,
   description: `Id del cambio: entero positivo (máximo ${ID_CAMBIO_MAXIMO}), por ejemplo el que devuelve el historial de cambios.`,
   schema: (esquemaConsultaCambio.properties ?? {}).idCambio,
+};
+
+// El parámetro de la anulación también se deriva de su esquema Zod real (hoy es el mismo que el del detalle)
+const esquemaAnulacionCambioParametros = z.toJSONSchema(anularCambioParametrosSchema, { io: "input", target: "draft-7" });
+const parametroIdCambioAnulacion = {
+  name: "idCambio",
+  in: "path",
+  required: true,
+  description: `Id del cambio a anular: entero positivo (máximo ${ID_CAMBIO_MAXIMO}), por ejemplo el que devuelve el historial de cambios.`,
+  schema: (esquemaAnulacionCambioParametros.properties ?? {}).idCambio,
 };
 
 // --- PARÁMETROS DEL HISTORIAL ---
@@ -1681,6 +1752,71 @@ export const openapiDocument = {
             content: { "application/json": { schema: cambioInexistente } },
           },
           ...respuestasProteccion,
+        },
+      },
+    },
+    "/api/cambios-mercaderia/{idCambio}/anulacion": {
+      post: {
+        tags: ["Ventas"],
+        security: [{ bearerAuth: [] }],
+        summary: "Anular un cambio de mercadería (baja y modificación)",
+        description:
+          "Anula un cambio `ACTIVO` dentro de una ventana de 15 minutos contada desde su `fechaHora` (el instante exacto del límite todavía permite anular); " +
+          "el reloj es el del servidor, tomado dentro de la transacción. Es una baja lógica: el cambio pasa a `ANULADO` y no se borra ni se edita ningún pago, precio ni cantidad. " +
+          "En la misma transacción revierte el stock: repone al producto entregado la cantidad entregada y descuenta al producto que recibió el stock lo que ingresó " +
+          "(unidades, o los kilos del granel si fue bolsa abierta; el descuento tiene guarda, y si el stock ya no alcanza —por ejemplo el granel ya se vendió— responde 409 y no queda nada escrito). " +
+          "Un cambio que cobró saldo (mayor a 0) exige alguna caja abierta (409 si no hay; cualquiera, no hace falta la del cambio); con saldo 0 no se exige. " +
+          "No se modifica el saldo de la caja: el saldo del cambio deja de contar por su estado. " +
+          "El body exige `motivo` (texto de 1 a 200 caracteres, recortado): vale tanto para la baja como para la edición. " +
+          "La anulación deja auditoría en el mismo UPDATE que cambia el estado: quién (el usuario del token, no el vendedor original), " +
+          "cuándo (reloj del servidor) y por qué; un `idUsuario` en el body se ignora. " +
+          "Un cambio anulado deja de contar en lo ya devuelto del ticket (vuelve a quedar disponible esa cantidad), en `cantidadYaDevuelta` y en `cantidadCambiosActivos` de las ventas, " +
+          "y en el historial pasa a figurar con `estado` ANULADO y `fechaHoraLimiteModificacion` nulo. " +
+          "Ante dos anulaciones simultáneas del mismo cambio solo una gana y la otra responde 409 `CAMBIO_YA_ANULADO`. " +
+          "Todos los errores de negocio y de validación traen `codigo`. " +
+          "Orden de evaluación: 400, 404, 409 (ya anulado), 403 (ventana vencida), 409 (sin caja abierta), 409 (stock insuficiente para revertir). " +
+          "**Edición ágil (modificar un cambio):** no hay un endpoint aparte. El front anula con este endpoint, consulta el detalle " +
+          "con `GET /api/cambios-mercaderia/{idCambio}` (que sigue funcionando sobre un cambio `ANULADO`) y vuelve a registrar el cambio " +
+          "con `POST /api/cambios-mercaderia`. Son llamadas independientes: si la última falla, el cambio original queda anulado. " +
+          "Requiere sesión (roles VENDEDOR, GESTOR_COMERCIAL o GERENTE).",
+        parameters: [parametroIdCambioAnulacion],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              // `io: "input"` describe lo que el cliente envía, no el resultado ya transformado
+              schema: z.toJSONSchema(anularCambioCuerpoSchema, { io: "input", target: "draft-7" }),
+            },
+          },
+        },
+        responses: {
+          "200": {
+            description: "Cambio anulado, stock revertido y auditoría registrada",
+            content: { "application/json": { schema: cambioAnulado } },
+          },
+          "400": {
+            description:
+              "`idCambio` inválido, o `motivo` ausente, vacío, solo espacios, que no es texto o de más de 200 caracteres " +
+              "(se valida antes de consultar el cambio): `codigo` `DATOS_INVALIDOS`",
+            content: { "application/json": { schema: errorValidacionAnulacionCambio } },
+          },
+          "401": respuestasProteccion["401"],
+          "403": {
+            description:
+              "`PLAZO_VENCIDO`: pasaron más de 15 minutos desde el registro del cambio (mensaje propio de negocio, con `codigo`). " +
+              "También responde 403, con otro mensaje y sin `codigo`, si el rol del usuario no está permitido",
+            content: { "application/json": { schema: plazoVencidoCambio } },
+          },
+          "404": {
+            description: "El cambio no existe (`CAMBIO_NO_ENCONTRADO`)",
+            content: { "application/json": { schema: cambioInexistente } },
+          },
+          "409": {
+            description:
+              "El cambio ya está ANULADO o lo anuló otra operación a la vez (`CAMBIO_YA_ANULADO`); tuvo saldo cobrado y no hay ninguna caja abierta (`SIN_CAJA_ABIERTA`); " +
+              "o no alcanza el stock para revertirlo (`STOCK_INSUFICIENTE_PARA_REVERTIR`)",
+            content: { "application/json": { schema: errorNegocioCambio } },
+          },
         },
       },
     },

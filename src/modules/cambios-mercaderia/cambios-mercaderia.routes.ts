@@ -1,6 +1,11 @@
 import { Router } from "express";
 import { requerirRol } from "../auth/auth.middleware.js";
-import { getConsultarCambio, getConsultarHistorialCambios, postRegistrarCambio } from "./cambios-mercaderia.controller.js";
+import {
+  getConsultarCambio,
+  getConsultarHistorialCambios,
+  postAnularCambio,
+  postRegistrarCambio,
+} from "./cambios-mercaderia.controller.js";
 
 // --- RUTAS ---
 
@@ -15,3 +20,6 @@ cambiosMercaderiaRouter.get("/", requerirRol("VENDEDOR", "GESTOR_COMERCIAL", "GE
 
 // GET /api/cambios-mercaderia/:idCambio: detalle de un cambio. Requiere sesión validada; no exige caja abierta
 cambiosMercaderiaRouter.get("/:idCambio", requerirRol("VENDEDOR", "GESTOR_COMERCIAL", "GERENTE"), getConsultarCambio);
+
+// POST /api/cambios-mercaderia/:idCambio/anulacion: baja y modificacion de un cambio (anula y repone/revierte stock; modificar = anular y volver a cargar con el alta). Requiere sesion validada; exige caja abierta solo si el cambio cobro saldo
+cambiosMercaderiaRouter.post("/:idCambio/anulacion", requerirRol("VENDEDOR", "GESTOR_COMERCIAL", "GERENTE"), postAnularCambio);

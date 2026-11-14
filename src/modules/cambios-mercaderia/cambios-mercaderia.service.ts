@@ -3,6 +3,7 @@ import { evaluarBolsaAbierta } from "../inventario/inventario.service.js";
 import {
   calcularDesplazamiento,
   calcularInicioDiaArgentina,
+  calcularLimiteVentana,
   calcularTotalPaginas,
   LIMITE_MINUTOS_ANULACION,
 } from "../ventas/ventas.service.js";
@@ -10,6 +11,9 @@ import type { TipoMedioPago } from "../ventas/ventas.types.js";
 import {
   crearErrorBolsaAbiertaNoPermitida,
   crearErrorCambioNoEncontrado,
+  crearErrorCambioYaAnulado,
+  crearErrorPlazoVencidoCambio,
+  crearErrorSinCajaParaAnularCambio,
   crearErrorCantidadExcedeVenta,
   crearErrorCantidadNoEntera,
   crearErrorMedioPagoInactivo,
@@ -28,8 +32,16 @@ import {
   crearErrorVentaOriginalNoExiste,
   crearErrorVentaOriginalPendientePago,
 } from "./cambios-mercaderia.errors.js";
-import { buscarDetalleCambio, buscarHistorialCambios, registrarCambioAtomico } from "./cambios-mercaderia.repository.js";
+import {
+  anularCambioAtomico,
+  buscarDetalleCambio,
+  buscarHistorialCambios,
+  registrarCambioAtomico,
+} from "./cambios-mercaderia.repository.js";
 import type {
+  AnularCambioInput,
+  AnularCambioResponse,
+  CambioAnulable,
   CambioCalculado,
   CambioDetalle,
   CambioDetalleLeido,
@@ -40,11 +52,13 @@ import type {
   ConsultarCambioResponse,
   ConsultarHistorialCambiosInput,
   ConsultarHistorialCambiosResponse,
+  DecisionAnulacionCambio,
   EstadoCambioHistorial,
   FilaHistorialCambio,
   FiltroHistorialCambios,
   IngresoAlStockCalculado,
   LecturaCambio,
+  OperacionReversionStock,
   ProductoParaCambio,
   RegistrarCambioInput,
   RegistrarCambioResponse,
@@ -451,6 +465,8 @@ export function calcularFiltroHistorialCambios(consulta: ConsultarHistorialCambi
 
 /**
  * Calcula hasta cuándo se puede anular o editar un cambio: su fecha y hora más la ventana de anulación de ventas.
+ * ATENCIÓN: es la misma regla que aplica `evaluarAnulacionCambio` (referencia `fechaHora` y la misma constante;
+ * el límite exacto todavía permite anular). Si cambia una, hay que cambiar la otra.
  * @returns El instante límite, o `null` si el cambio está anulado (ya no tiene ventana).
  */
 export function calcularLimiteModificacionCambio(fechaHora: Date, estado: EstadoCambioHistorial): Date | null {
@@ -598,4 +614,119 @@ function formatearImporte(importe: Decimal): string {
  */
 function formatearCantidad(cantidad: Decimal): string {
   return cantidad.toFixed(3);
+}
+
+// --- ANULACIÓN DE CAMBIO: ORQUESTACIÓN ---
+
+/**
+ * Anula un cambio de mercadería (baja y modificación son esta misma operación: modificar es anular y volver a cargar
+ * con el alta): evalúa las reglas puras y persiste la transición y la reversión del stock en una única transacción.
+ * La evaluación se inyecta al repositorio como función para que corra dentro de la transacción, con el cambio y la caja
+ * leídos en ese mismo momento y con el reloj tomado en ese instante. El repositorio relee el cambio ya anulado dentro de
+ * la misma transacción, así que lo que se devuelve es lo que quedó guardado.
+ * @param input Parámetro de ruta y motivo ya validados por Zod, más el usuario del token.
+ * @returns Respuesta lista para enviar al frontend.
+ * @throws {ErrorNegocioCambio} Si alguna regla de negocio no se cumple (nada queda escrito).
+ */
+export async function anularCambio(input: AnularCambioInput): Promise<AnularCambioResponse> {
+  const detalle = await anularCambioAtomico(input, (cambio, hayCajaAbierta) =>
+    // El reloj se toma aquí, dentro de la transacción: así la espera de conexión o de bloqueos no le regala tiempo a la ventana
+    evaluarAnulacionCambio(input, cambio, new Date(), hayCajaAbierta),
+  );
+
+  return {
+    exito: true,
+    mensaje: detalle.saldoResultante.gt(0)
+      ? "Cambio anulado, saldo revertido y stock repuesto"
+      : "Cambio anulado y stock repuesto",
+    // El reloj se toma después de confirmar la transacción: es lo más cercano al momento en que el front recibe la respuesta
+    fechaHoraServidor: new Date().toISOString(),
+    cambio: construirDetalleCambio(detalle),
+  };
+}
+
+// --- ANULACIÓN DE CAMBIO: REGLAS PURAS ---
+
+/**
+ * Aplica las reglas de negocio de la anulación de un cambio sin acceder a la base de datos ni al reloj.
+ * Es pura a propósito: así se prueba con datos de ejemplo sin conectarse a Supabase.
+ * El orden de las comprobaciones es parte del contrato: 404, 409 (ya anulado), 403 (ventana), 409 (sin caja).
+ * El stock insuficiente para revertir lo resuelve el repositorio después, con una guarda atómica.
+ * @param input Entrada validada de la anulación (solo se usa el id del cambio; el motivo y el usuario los persiste el repositorio).
+ * @param cambio Cambio leído de la BD, o `null` si no existe.
+ * @param ahora Instante actual del servidor.
+ * @param hayCajaAbierta Si existe al menos una sesión de caja abierta (cualquiera, no hace falta la del cambio).
+ * @returns El límite de la ventana, el instante de la anulación y los movimientos de stock a aplicar, para que el
+ * repositorio condicione la transición y registre la auditoría con ese mismo instante.
+ * @throws {ErrorNegocioCambio} Cambio inexistente (404), ya anulado (409), ventana vencida (403) o
+ * cambio con saldo cobrado sin caja abierta (409). Se lanza como objeto puro, no como Error.
+ */
+export function evaluarAnulacionCambio(
+  input: AnularCambioInput,
+  cambio: CambioAnulable | null,
+  ahora: Date,
+  hayCajaAbierta: boolean,
+): DecisionAnulacionCambio {
+  if (cambio === null) {
+    throw crearErrorCambioNoEncontrado(input.idCambio);
+  }
+  if (cambio.estado === "ANULADO") {
+    throw crearErrorCambioYaAnulado(cambio.idCambio);
+  }
+
+  // La ventana corre desde la fecha y hora del cambio.
+  // ATENCIÓN: es la misma regla que expone `calcularLimiteModificacionCambio` al front (`fechaHoraLimiteModificacion`).
+  // Si cambia una, hay que cambiar la otra.
+  const limiteVentana = calcularLimiteVentana(ahora);
+  if (cambio.fechaHora < limiteVentana) {
+    throw crearErrorPlazoVencidoCambio(LIMITE_MINUTOS_ANULACION);
+  }
+
+  // Solo un cambio que cobró saldo (mayor a 0) revierte caja y por eso exige una caja abierta; con saldo 0 no hay nada que revertir
+  if (cambio.saldoResultante.gt(0) && !hayCajaAbierta) {
+    throw crearErrorSinCajaParaAnularCambio();
+  }
+
+  // El mismo `ahora` fija el límite de la ventana y el instante de la anulación: un único reloj por operación
+  return {
+    limiteVentana,
+    fechaHoraAnulacion: ahora,
+    operaciones: calcularReversionStock(cambio),
+  };
+}
+
+// --- ANULACIÓN DE CAMBIO: REVERSIÓN DE STOCK ---
+
+/**
+ * Calcula los movimientos de stock que deshacen un cambio, con Decimal exacto y ya en el orden en que deben aplicarse:
+ * reponer al producto entregado la cantidad entregada y descontar al producto que recibió el stock lo que ingresó
+ * (unidades, o kilos del granel si fue bolsa abierta: la columna guarda exactamente lo que entró).
+ * Orden por `idProducto` ascendente: dos anulaciones o altas simultáneas que comparten productos bloquean las filas en
+ * el mismo orden y no se traban entre sí (deadlock).
+ * Si ambos lados son el mismo producto, la reposición va ANTES que el descuento (al revés que en el alta): así la guarda
+ * del descuento cuenta lo repuesto y solo se rechaza si el stock final quedaría negativo, que es lo que importa.
+ * @param cambio Cambio leído para anular.
+ */
+export function calcularReversionStock(cambio: CambioAnulable): OperacionReversionStock[] {
+  const { productoEntregado, productoStockIngresado } = cambio;
+  const operaciones: OperacionReversionStock[] = [
+    {
+      idProducto: productoEntregado.idProducto,
+      nombreProducto: productoEntregado.nombre,
+      tipo: "REPOSICION",
+      cantidad: productoEntregado.cantidadEntregada,
+    },
+    {
+      idProducto: productoStockIngresado.idProducto,
+      nombreProducto: productoStockIngresado.nombre,
+      tipo: "DESCUENTO",
+      cantidad: productoStockIngresado.cantidadStockIngresado,
+    },
+  ];
+
+  // Con el mismo producto el desempate pone la reposición primero (REPOSICION = 0, DESCUENTO = 1)
+  const prioridadDeTipo: Record<OperacionReversionStock["tipo"], number> = { REPOSICION: 0, DESCUENTO: 1 };
+  return operaciones.sort(
+    (primera, segunda) => primera.idProducto - segunda.idProducto || prioridadDeTipo[primera.tipo] - prioridadDeTipo[segunda.tipo],
+  );
 }
