@@ -28,10 +28,17 @@ export type ProductoGranelLeido = {
   estado: "ACTIVO" | "INACTIVO";
 };
 
+/** Categoría de un producto, reducida al nombre vigente (no se congela en ningún registro). */
+export type ProductoCategoriaLeida = {
+  nombre: string;
+};
+
 /** Producto activo tal como lo lee el repository, con solo los campos del contrato y los de la regla de bolsa abierta. */
 export type ProductoLeido = {
   idProducto: number;
   nombre: string;
+  /** Categoría del producto; `productos.id_categoria` es NOT NULL, así que siempre existe. */
+  categoria: ProductoCategoriaLeida;
   precioVenta: DecimalExacto;
   stockFisico: DecimalExacto;
   formatoVenta: FormatoVenta;
@@ -69,6 +76,8 @@ export type ProductoParaBolsaAbierta = {
 export type ProductoCatalogo = {
   idProducto: number;
   nombre: string;
+  /** Nombre vigente de la categoría del producto. */
+  categoria: string;
   /** Precio vigente, texto con 2 decimales. */
   precioVenta: string;
   /** Stock disponible, texto con 3 decimales. */

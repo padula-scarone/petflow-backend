@@ -57,6 +57,8 @@ function convertirProducto(producto: ProductoLeido): ProductoCatalogo {
   return {
     idProducto: producto.idProducto,
     nombre: producto.nombre,
+    // Se expone el nombre vigente de la categoría, sin congelarlo
+    categoria: producto.categoria.nombre,
     // toFixed del decimal evita pasar por number y perder exactitud
     precioVenta: producto.precioVenta.toFixed(2),
     stockFisico: producto.stockFisico.toFixed(3),
