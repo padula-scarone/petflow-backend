@@ -5,6 +5,7 @@ import { crearErrorStockInsuficiente } from "../ventas/ventas.errors.js";
 import { crearErrorSinCajaParaCambio } from "./cambios-mercaderia.errors.js";
 import type {
   CambioCalculado,
+  CambioDetalleLeido,
   CambioPersistido,
   FiltroHistorialCambios,
   LecturaCambio,
@@ -369,4 +370,113 @@ export async function buscarHistorialCambios(
     })),
     totalRegistros,
   };
+}
+
+// --- DETALLE DE CAMBIO ---
+
+/**
+ * Lee un cambio completo con una sola consulta: el cambio y, por relación, la venta, los tres productos,
+ * el medio de pago y los dos usuarios (vendedor y quien anuló). Así no hay una consulta por relación (N+1)
+ * y todo sale de la misma lectura.
+ * Recibe el cliente para poder usarse dentro de la transacción del alta (relectura del cambio recién creado)
+ * y dentro de la lectura de solo lectura del detalle.
+ * Los nombres de producto, de medio de pago y de usuario son los vigentes: no se congelan en el cambio.
+ * @returns El cambio, o `null` si no existe (el service decide el 404).
+ */
+async function leerDetalleCambio(transaccion: ClienteTransaccion, idCambio: number): Promise<CambioDetalleLeido | null> {
+  const cambio = await transaccion.cambioMercaderia.findUnique({
+    where: { idCambio },
+    select: {
+      idCambio: true,
+      fechaHora: true,
+      estado: true,
+      motivoCambio: true,
+      esBolsaAbierta: true,
+      cantidadDevuelta: true,
+      precioUnitarioDevuelto: true,
+      cantidadStockIngresado: true,
+      cantidadEntregada: true,
+      precioUnitarioEntregado: true,
+      saldoResultante: true,
+      montoRecibido: true,
+      vuelto: true,
+      fechaHoraAnulacion: true,
+      motivoAnulacion: true,
+      idVentaOriginal: true,
+      ventaOriginal: { select: { numeroComprobante: true } },
+      idProductoDevuelto: true,
+      productoDevuelto: { select: { nombre: true, formatoVenta: true } },
+      idProductoStockIngresado: true,
+      productoStockIngresado: { select: { nombre: true } },
+      idProductoEntregado: true,
+      productoEntregado: { select: { nombre: true, formatoVenta: true } },
+      idMedioPago: true,
+      medioPago: { select: { nombre: true } },
+      usuario: { select: { idUsuario: true, nombre: true } },
+      usuarioAnulacion: { select: { idUsuario: true, nombre: true } },
+    },
+  });
+  if (cambio === null) {
+    return null;
+  }
+
+  return {
+    idCambio: cambio.idCambio,
+    fechaHora: cambio.fechaHora,
+    estado: cambio.estado,
+    motivoCambio: cambio.motivoCambio,
+    ventaOriginal:
+      cambio.idVentaOriginal === null
+        ? null
+        : { idVenta: cambio.idVentaOriginal, numeroComprobante: cambio.ventaOriginal?.numeroComprobante ?? null },
+    productoDevuelto: {
+      idProducto: cambio.idProductoDevuelto,
+      nombre: cambio.productoDevuelto.nombre,
+      formatoVenta: cambio.productoDevuelto.formatoVenta,
+      cantidadDevuelta: aDecimal(cambio.cantidadDevuelta),
+      esBolsaAbierta: cambio.esBolsaAbierta,
+      precioUnitario: aDecimal(cambio.precioUnitarioDevuelto),
+    },
+    productoStockIngresado: {
+      idProducto: cambio.idProductoStockIngresado,
+      nombre: cambio.productoStockIngresado.nombre,
+      cantidadStockIngresado: aDecimal(cambio.cantidadStockIngresado),
+    },
+    productoEntregado: {
+      idProducto: cambio.idProductoEntregado,
+      nombre: cambio.productoEntregado.nombre,
+      formatoVenta: cambio.productoEntregado.formatoVenta,
+      cantidadEntregada: aDecimal(cambio.cantidadEntregada),
+      precioUnitario: aDecimal(cambio.precioUnitarioEntregado),
+    },
+    saldoResultante: aDecimal(cambio.saldoResultante),
+    medioPago:
+      cambio.idMedioPago === null || cambio.medioPago === null
+        ? null
+        : { idMedioPago: cambio.idMedioPago, nombre: cambio.medioPago.nombre },
+    montoRecibido: cambio.montoRecibido === null ? null : aDecimal(cambio.montoRecibido),
+    vuelto: cambio.vuelto === null ? null : aDecimal(cambio.vuelto),
+    vendedor: { idUsuario: cambio.usuario.idUsuario, nombre: cambio.usuario.nombre },
+    // Solo hay auditoría completa en un cambio anulado después de registrarla; en cualquier otro caso es nula
+    anulacion:
+      cambio.fechaHoraAnulacion === null || cambio.motivoAnulacion === null || cambio.usuarioAnulacion === null
+        ? null
+        : {
+            fechaHora: cambio.fechaHoraAnulacion,
+            usuario: { idUsuario: cambio.usuarioAnulacion.idUsuario, nombre: cambio.usuarioAnulacion.nombre },
+            motivo: cambio.motivoAnulacion,
+          },
+  };
+}
+
+/**
+ * Busca un cambio completo para `GET /api/cambios-mercaderia/:idCambio`. Es solo lectura.
+ * Corre en una transacción `RepeatableRead` como el resto de las consultas del sistema: todas las lecturas
+ * ven la misma foto de la base aunque el motor resuelva las relaciones con más de una consulta.
+ * @returns El cambio, o `null` si no existe.
+ */
+export async function buscarDetalleCambio(idCambio: number): Promise<CambioDetalleLeido | null> {
+  return prisma.$transaction((transaccion) => leerDetalleCambio(transaccion, idCambio), {
+    isolationLevel: "RepeatableRead",
+  });
 }

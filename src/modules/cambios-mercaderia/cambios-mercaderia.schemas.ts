@@ -102,3 +102,16 @@ export const consultarHistorialCambiosSchema = z
       });
     }
   });
+
+// --- DETALLE DE UN CAMBIO: PARÁMETRO DE RUTA ---
+
+/** Tope de `idCambio`: máximo de una columna integer de PostgreSQL (más allá, la BD falla con 500). */
+export const ID_CAMBIO_MAXIMO = 2_147_483_647;
+
+/**
+ * Contrato de entrada de `GET /api/cambios-mercaderia/:idCambio`: el id llega como texto por la ruta
+ * y la conversión a número es estricta (ver `enteroDesdeTexto` de ventas).
+ */
+export const consultarCambioSchema = z.object({
+  idCambio: enteroDesdeTexto(1, ID_CAMBIO_MAXIMO),
+});

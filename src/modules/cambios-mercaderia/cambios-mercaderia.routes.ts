@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { requerirRol } from "../auth/auth.middleware.js";
-import { getConsultarHistorialCambios, postRegistrarCambio } from "./cambios-mercaderia.controller.js";
+import { getConsultarCambio, getConsultarHistorialCambios, postRegistrarCambio } from "./cambios-mercaderia.controller.js";
 
 // --- RUTAS ---
 
@@ -12,3 +12,6 @@ cambiosMercaderiaRouter.post("/", requerirRol("VENDEDOR", "GESTOR_COMERCIAL", "G
 
 // GET /api/cambios-mercaderia: historial paginado con filtros (fecha, producto, estado, vínculo, medio de pago). Requiere sesión validada; no exige caja abierta
 cambiosMercaderiaRouter.get("/", requerirRol("VENDEDOR", "GESTOR_COMERCIAL", "GERENTE"), getConsultarHistorialCambios);
+
+// GET /api/cambios-mercaderia/:idCambio: detalle de un cambio. Requiere sesión validada; no exige caja abierta
+cambiosMercaderiaRouter.get("/:idCambio", requerirRol("VENDEDOR", "GESTOR_COMERCIAL", "GERENTE"), getConsultarCambio);

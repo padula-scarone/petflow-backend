@@ -3,6 +3,7 @@ import type { Decimal } from "../../shared/decimal.js";
 import type { FormatoVenta, ProductoGranelAsociado } from "../inventario/inventario.types.js";
 import type { PaginacionHistorial } from "../ventas/ventas.types.js";
 import type {
+  consultarCambioSchema,
   consultarHistorialCambiosSchema,
   ESTADOS_CAMBIO_HISTORIAL,
   registrarCambioSchema,
@@ -241,4 +242,143 @@ export type ConsultarHistorialCambiosResponse = {
   fechaHoraServidor: string;
   cambios: CambioHistorial[];
   paginacion: PaginacionHistorial;
+};
+
+// --- DETALLE DE UN CAMBIO: ENTRADA ---
+
+/** Parámetro de ruta validado de `GET /api/cambios-mercaderia/:idCambio`, inferido del esquema Zod. */
+export type ConsultarCambioInput = z.infer<typeof consultarCambioSchema>;
+
+// --- DETALLE DE UN CAMBIO: DATOS DE LA BASE ---
+// Cantidades e importes como Decimal exacto; las fechas, como `Date`.
+
+/** Persona de una auditoría o del registro del cambio: quien lo cargó o quien lo anuló. */
+export type UsuarioCambio = {
+  idUsuario: number;
+  nombre: string;
+};
+
+/** Cambio completo tal como lo entrega el repositorio: sin cálculos, solo lo que está guardado y los nombres vigentes. */
+export type CambioDetalleLeido = {
+  idCambio: number;
+  fechaHora: Date;
+  estado: EstadoCambioHistorial;
+  /** Nulo en los cambios anteriores a que se registrara el motivo. */
+  motivoCambio: string | null;
+  /** Venta a la que se vinculó el cambio; nulo si es un cambio aislado. */
+  ventaOriginal: {
+    idVenta: number;
+    /** Nulo solo en datos anteriores al backfill del comprobante. */
+    numeroComprobante: string | null;
+  } | null;
+  productoDevuelto: {
+    idProducto: number;
+    nombre: string;
+    formatoVenta: FormatoVenta;
+    cantidadDevuelta: Decimal;
+    esBolsaAbierta: boolean;
+    /** Precio unitario congelado al registrar el cambio; con bolsa abierta es el precio de la bolsa. */
+    precioUnitario: Decimal;
+  };
+  /** Producto que recibió el stock: el devuelto, o su granel si fue bolsa abierta. La columna es NOT NULL. */
+  productoStockIngresado: {
+    idProducto: number;
+    nombre: string;
+    /** Unidades del producto ingresado, o kilos si ingresó a granel. */
+    cantidadStockIngresado: Decimal;
+  };
+  productoEntregado: {
+    idProducto: number;
+    nombre: string;
+    formatoVenta: FormatoVenta;
+    cantidadEntregada: Decimal;
+    /** Precio unitario congelado al registrar el cambio. */
+    precioUnitario: Decimal;
+  };
+  saldoResultante: Decimal;
+  /** Nulo si el cambio no tuvo saldo que cobrar. */
+  medioPago: { idMedioPago: number; nombre: string } | null;
+  /** Solo efectivo con monto recibido informado; nulo en otro caso y en cambios anteriores. */
+  montoRecibido: Decimal | null;
+  vuelto: Decimal | null;
+  vendedor: UsuarioCambio;
+  /** Nulo mientras el cambio no esté anulado o si se anuló antes de que se registrara la auditoría. */
+  anulacion: { fechaHora: Date; usuario: UsuarioCambio; motivo: string } | null;
+};
+
+// --- DETALLE DE UN CAMBIO: RESPUESTA HTTP ---
+
+/** Artículo devuelto en la respuesta del detalle. Cantidad con 3 decimales e importes con 2, como texto. */
+export type ArticuloDevueltoDetalle = {
+  idProducto: number;
+  nombreProducto: string;
+  formatoVenta: FormatoVenta;
+  cantidadDevuelta: string;
+  esBolsaAbierta: boolean;
+  /** Precio unitario congelado al registrar el cambio; con bolsa abierta es el precio de la bolsa. */
+  precioUnitario: string;
+  /** Crédito del devuelto; con bolsa abierta, el de la fracción de bolsa que se devolvió. */
+  subtotal: string;
+};
+
+/** Artículo entregado en la respuesta del detalle. Cantidad con 3 decimales e importes con 2, como texto. */
+export type ArticuloEntregadoDetalle = {
+  idProducto: number;
+  nombreProducto: string;
+  formatoVenta: FormatoVenta;
+  cantidadEntregada: string;
+  /** Precio unitario congelado al registrar el cambio. */
+  precioUnitario: string;
+  /** Valor de lo entregado: precio unitario × cantidad, redondeado a centavos. */
+  subtotal: string;
+};
+
+/**
+ * Cambio completo de `GET /api/cambios-mercaderia/:idCambio` y del `POST`.
+ * Cantidades como texto con 3 decimales e importes como texto con 2.
+ */
+export type CambioDetalle = {
+  idCambio: number;
+  /** Fecha y hora en formato ISO 8601. */
+  fechaHora: string;
+  estado: EstadoCambioHistorial;
+  /** Hasta cuándo se puede anular o editar (ISO 8601); nulo si el cambio está anulado. */
+  fechaHoraLimiteModificacion: string | null;
+  /** Nulo en los cambios anteriores a que se registrara el motivo. */
+  motivoCambio: string | null;
+  /** Nulo si el cambio es aislado. */
+  ventaVinculada: { idVenta: number; numeroComprobante: string | null } | null;
+  articuloDevuelto: ArticuloDevueltoDetalle;
+  /** Producto que recibió el stock: el devuelto, o su granel si fue bolsa abierta. */
+  productoStockIngresado: {
+    idProducto: number;
+    nombreProducto: string;
+    /** Kilos que ingresaron al granel si fue bolsa abierta; nulo en otro caso. */
+    cantidadStockIngresado: string | null;
+  };
+  articuloEntregado: ArticuloEntregadoDetalle;
+  /** Crédito del producto devuelto: igual al subtotal del devuelto. */
+  valorDevuelto: string;
+  /** Valor de lo entregado: igual al subtotal del entregado. */
+  valorEntregado: string;
+  saldoResultante: string;
+  /** Nulo si el cambio no tuvo saldo que cobrar. */
+  pagoSaldo: {
+    idMedioPago: number;
+    nombreMedioPago: string;
+    /** Solo efectivo con monto recibido informado. */
+    montoRecibido: string | null;
+    vuelto: string | null;
+  } | null;
+  vendedor: UsuarioCambio;
+  /** Nulo mientras el cambio no esté anulado o si se anuló antes de que se registrara la auditoría. */
+  anulacion: { fechaHora: string; usuario: UsuarioCambio; motivo: string } | null;
+};
+
+/** Respuesta exitosa de `GET /api/cambios-mercaderia/:idCambio`. */
+export type ConsultarCambioResponse = {
+  exito: true;
+  /** Hora del servidor al responder (ISO 8601): el front la compara con `fechaHoraLimiteModificacion`. */
+  fechaHoraServidor: string;
+  cambio: CambioDetalle;
 };

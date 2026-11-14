@@ -9,6 +9,7 @@ import {
 } from "../ventas/ventas.service.js";
 import {
   crearErrorBolsaAbiertaNoPermitida,
+  crearErrorCambioNoEncontrado,
   crearErrorCantidadExcedeVenta,
   crearErrorMedioPagoRequerido,
   crearErrorProductoNoFiguraEnVenta,
@@ -17,11 +18,15 @@ import {
   crearErrorVentaOriginalAnulada,
   crearErrorVentaOriginalPendientePago,
 } from "./cambios-mercaderia.errors.js";
-import { buscarHistorialCambios, registrarCambioAtomico } from "./cambios-mercaderia.repository.js";
+import { buscarDetalleCambio, buscarHistorialCambios, registrarCambioAtomico } from "./cambios-mercaderia.repository.js";
 import type {
   CambioCalculado,
+  CambioDetalle,
+  CambioDetalleLeido,
   CambioHistorial,
   CambioPersistido,
+  ConsultarCambioInput,
+  ConsultarCambioResponse,
   ConsultarHistorialCambiosInput,
   ConsultarHistorialCambiosResponse,
   EstadoCambioHistorial,
@@ -387,6 +392,99 @@ function convertirFilaHistorialCambio(fila: FilaHistorialCambio): CambioHistoria
     saldoResultante: formatearImporte(fila.saldoResultante),
     idMedioPago: fila.idMedioPago,
     nombreMedioPago: fila.nombreMedioPago,
+  };
+}
+
+// --- DETALLE DE CAMBIO ---
+
+/**
+ * Consulta un cambio completo por su id. No exige caja abierta ni distingue roles: lo decide la ruta.
+ * @param consulta Parámetro de ruta ya validado por Zod.
+ * @returns El cambio con sus valores calculados y la hora del servidor.
+ * @throws {ErrorNegocioCambio} 404 si el cambio no existe. Se lanza como objeto puro, no como Error.
+ */
+export async function consultarCambio(consulta: ConsultarCambioInput): Promise<ConsultarCambioResponse> {
+  const cambioLeido = await buscarDetalleCambio(consulta.idCambio);
+  if (cambioLeido === null) {
+    throw crearErrorCambioNoEncontrado(consulta.idCambio);
+  }
+
+  return {
+    exito: true,
+    // El reloj se toma recién después de leer: es lo más cercano al momento en que el front recibe la respuesta
+    fechaHoraServidor: new Date().toISOString(),
+    cambio: construirDetalleCambio(cambioLeido),
+  };
+}
+
+/**
+ * Arma el cambio de la respuesta a partir de lo leído. Lo comparten el detalle y el alta (que relee el cambio
+ * recién creado), así los dos devuelven exactamente el mismo contenido.
+ * Todo el cálculo es con Decimal exacto: el valor de lo entregado se redondea a centavos igual que en el alta
+ * y el crédito del devuelto sale de restar el saldo a ese valor.
+ * @param cambio Cambio tal como lo entrega el repositorio.
+ */
+export function construirDetalleCambio(cambio: CambioDetalleLeido): CambioDetalle {
+  const valorEntregado = calcularSubtotal(cambio.productoEntregado.precioUnitario, cambio.productoEntregado.cantidadEntregada);
+  // El saldo se guardó como (valor entregado − crédito), cada lado redondeado a centavos: el crédito es exactamente
+  // la resta inversa. No se recalcula con el peso nominal porque no se guarda y `productos.peso_unitario` puede cambiar después
+  const valorDevuelto = valorEntregado.minus(cambio.saldoResultante);
+  const limiteModificacion = calcularLimiteModificacionCambio(cambio.fechaHora, cambio.estado);
+  const { productoDevuelto, productoStockIngresado, productoEntregado, medioPago } = cambio;
+
+  return {
+    idCambio: cambio.idCambio,
+    fechaHora: cambio.fechaHora.toISOString(),
+    estado: cambio.estado,
+    fechaHoraLimiteModificacion: limiteModificacion === null ? null : limiteModificacion.toISOString(),
+    motivoCambio: cambio.motivoCambio,
+    ventaVinculada: cambio.ventaOriginal,
+    articuloDevuelto: {
+      idProducto: productoDevuelto.idProducto,
+      nombreProducto: productoDevuelto.nombre,
+      formatoVenta: productoDevuelto.formatoVenta,
+      cantidadDevuelta: formatearCantidad(productoDevuelto.cantidadDevuelta),
+      esBolsaAbierta: productoDevuelto.esBolsaAbierta,
+      precioUnitario: formatearImporte(productoDevuelto.precioUnitario),
+      subtotal: formatearImporte(valorDevuelto),
+    },
+    productoStockIngresado: {
+      idProducto: productoStockIngresado.idProducto,
+      nombreProducto: productoStockIngresado.nombre,
+      // Sin bolsa abierta la columna guarda las unidades devueltas, que ya figuran en `cantidadDevuelta`: no se repiten
+      cantidadStockIngresado: productoDevuelto.esBolsaAbierta
+        ? formatearCantidad(productoStockIngresado.cantidadStockIngresado)
+        : null,
+    },
+    articuloEntregado: {
+      idProducto: productoEntregado.idProducto,
+      nombreProducto: productoEntregado.nombre,
+      formatoVenta: productoEntregado.formatoVenta,
+      cantidadEntregada: formatearCantidad(productoEntregado.cantidadEntregada),
+      precioUnitario: formatearImporte(productoEntregado.precioUnitario),
+      subtotal: formatearImporte(valorEntregado),
+    },
+    valorDevuelto: formatearImporte(valorDevuelto),
+    valorEntregado: formatearImporte(valorEntregado),
+    saldoResultante: formatearImporte(cambio.saldoResultante),
+    pagoSaldo:
+      medioPago === null
+        ? null
+        : {
+            idMedioPago: medioPago.idMedioPago,
+            nombreMedioPago: medioPago.nombre,
+            montoRecibido: cambio.montoRecibido === null ? null : formatearImporte(cambio.montoRecibido),
+            vuelto: cambio.vuelto === null ? null : formatearImporte(cambio.vuelto),
+          },
+    vendedor: cambio.vendedor,
+    anulacion:
+      cambio.anulacion === null
+        ? null
+        : {
+            fechaHora: cambio.anulacion.fechaHora.toISOString(),
+            usuario: cambio.anulacion.usuario,
+            motivo: cambio.anulacion.motivo,
+          },
   };
 }
 

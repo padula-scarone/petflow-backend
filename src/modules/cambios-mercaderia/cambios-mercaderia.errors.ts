@@ -1,8 +1,69 @@
-import { crearErrorNegocio } from "../ventas/ventas.errors.js";
-import type { ErrorNegocio } from "../ventas/ventas.errors.js";
+import { crearErrorNegocio, esErrorNegocio } from "../ventas/ventas.errors.js";
+import type { ErrorNegocio, EstadoHttpNegocio } from "../ventas/ventas.errors.js";
 
 // Los errores de negocio comparten el tipo y la guarda `esErrorNegocio` de ventas, por importación.
 // Moverlos a `shared` queda como deuda técnica registrada.
+
+// --- CÓDIGO LEGIBLE POR MÁQUINA ---
+
+/**
+ * Código con el que el front distingue el caso de un rechazo sin leer el texto del mensaje.
+ * Es el enum `CodigoErrorCambio` del front, sin los valores que corresponden a la anulación y edición de cambios
+ * (`PLAZO_VENCIDO`, `CAMBIO_YA_ANULADO`, `STOCK_INSUFICIENTE_PARA_REVERTIR`), que todavía no existen en el back.
+ * El enum del front no tiene valores propios para "producto inexistente" ni "medio de pago inexistente":
+ * esos 404 salen como `DATOS_INVALIDOS`.
+ */
+export type CodigoErrorCambio =
+  | "DATOS_INVALIDOS"
+  | "SALDO_NEGATIVO"
+  | "VENTA_NO_ENCONTRADA"
+  | "CAMBIO_NO_ENCONTRADO"
+  | "SIN_CAJA_ABIERTA"
+  | "STOCK_INSUFICIENTE"
+  | "VENTA_NO_VINCULABLE"
+  | "CANTIDAD_EXCEDE_VENTA";
+
+/**
+ * Error de negocio del módulo de cambios: el de ventas más el `codigo` legible por máquina.
+ * Sigue siendo un dato puro (sin class ni new) y `esErrorNegocio` lo sigue reconociendo.
+ */
+export type ErrorNegocioCambio = ErrorNegocio & {
+  codigo: CodigoErrorCambio;
+};
+
+// --- FÁBRICA Y GUARDA ---
+
+/**
+ * Crea un error de negocio de cambios: el de ventas con su código.
+ * @param mensaje Mensaje legible para el frontend.
+ * @param status 400, 404 o 409 (el mismo criterio que en ventas).
+ * @param codigo Código legible por máquina que acompaña al mensaje.
+ */
+export function crearErrorNegocioCambio(
+  mensaje: string,
+  status: EstadoHttpNegocio,
+  codigo: CodigoErrorCambio,
+): ErrorNegocioCambio {
+  return { ...crearErrorNegocio(mensaje, status), codigo };
+}
+
+/**
+ * Indica si un valor capturado es un error de negocio de cambios (con su `codigo`).
+ * Es más estricta que `esErrorNegocio`: un error de ventas sin código no pasa.
+ */
+export function esErrorNegocioCambio(valor: unknown): valor is ErrorNegocioCambio {
+  return esErrorNegocio(valor) && typeof (valor as { codigo?: unknown }).codigo === "string";
+}
+
+// --- FÁBRICAS: DETALLE ---
+
+/**
+ * Crea el error de consultar un cambio que no existe.
+ * @param idCambio Id del cambio buscado.
+ */
+export function crearErrorCambioNoEncontrado(idCambio: number): ErrorNegocioCambio {
+  return crearErrorNegocioCambio(`El cambio ${idCambio} no existe`, 404, "CAMBIO_NO_ENCONTRADO");
+}
 
 // --- FÁBRICAS: CAJA ---
 

@@ -1,8 +1,13 @@
 import type { Request, Response } from "express";
 import type { SesionAutenticada } from "../auth/auth.types.js";
 import { esErrorNegocio } from "../ventas/ventas.errors.js";
-import { consultarHistorialCambiosSchema, registrarCambioSchema } from "./cambios-mercaderia.schemas.js";
-import { consultarHistorialCambios, registrarCambio } from "./cambios-mercaderia.service.js";
+import { esErrorNegocioCambio } from "./cambios-mercaderia.errors.js";
+import {
+  consultarCambioSchema,
+  consultarHistorialCambiosSchema,
+  registrarCambioSchema,
+} from "./cambios-mercaderia.schemas.js";
+import { consultarCambio, consultarHistorialCambios, registrarCambio } from "./cambios-mercaderia.service.js";
 
 // --- FUNCIONES AUXILIARES ---
 
@@ -27,6 +32,33 @@ function construirRespuestaValidacion(mensaje: string, incidencias: ReadonlyArra
       mensaje: incidencia.message,
     })),
   };
+}
+
+/**
+ * Igual que `construirRespuestaValidacion`, más el `codigo` legible por máquina que el front distingue del mensaje.
+ * Se usa en el alta y en el detalle; el historial conserva su respuesta de siempre.
+ */
+function construirRespuestaValidacionConCodigo(mensaje: string, incidencias: ReadonlyArray<IncidenciaValidacion>) {
+  return { ...construirRespuestaValidacion(mensaje, incidencias), codigo: "DATOS_INVALIDOS" };
+}
+
+/**
+ * Responde un error de negocio del alta o del detalle con su código HTTP, su mensaje y su `codigo`.
+ * Un error de negocio sin `codigo` (no debería ocurrir en este módulo) se responde igual, sin él.
+ * @returns `true` si el valor era un error de negocio y ya se respondió; `false` si hay que relanzarlo.
+ */
+function responderErrorNegocio(res: Response, errorCapturado: unknown): boolean {
+  if (esErrorNegocioCambio(errorCapturado)) {
+    res
+      .status(errorCapturado.status)
+      .json({ exito: false, mensaje: errorCapturado.mensaje, codigo: errorCapturado.codigo });
+    return true;
+  }
+  if (esErrorNegocio(errorCapturado)) {
+    res.status(errorCapturado.status).json({ exito: false, mensaje: errorCapturado.mensaje });
+    return true;
+  }
+  return false;
 }
 
 // --- HANDLERS ---
@@ -86,6 +118,32 @@ export async function getConsultarHistorialCambios(req: Request, res: Response):
     // Igual que en el alta: los errores de negocio se traducen y cualquier otro valor sube a Express
     if (esErrorNegocio(errorCapturado)) {
       res.status(errorCapturado.status).json({ exito: false, mensaje: errorCapturado.mensaje });
+      return;
+    }
+    throw errorCapturado;
+  }
+}
+
+/**
+ * Handler de `GET /api/cambios-mercaderia/:idCambio`: detalle de un cambio.
+ * Valida el parámetro y delega en el service. No contiene reglas de negocio ni exige caja abierta.
+ * La sesión validada (cualquier rol) la exige `requerirRol` en la ruta, no este handler.
+ * Respuestas: 200 con el cambio; 400 si `idCambio` no es un entero válido; 404 si el cambio no existe.
+ */
+export async function getConsultarCambio(req: Request, res: Response): Promise<void> {
+  // Los parámetros de ruta llegan siempre como texto: el esquema los convierte de forma estricta
+  const parseo = consultarCambioSchema.safeParse(req.params);
+  if (!parseo.success) {
+    res.status(400).json(construirRespuestaValidacionConCodigo("Parámetros de consulta inválidos", parseo.error.issues));
+    return;
+  }
+
+  try {
+    const resultado = await consultarCambio(parseo.data);
+    res.status(200).json(resultado);
+  } catch (errorCapturado) {
+    // Los errores de negocio (objetos puros) se traducen; cualquier otro valor sube a Express
+    if (responderErrorNegocio(res, errorCapturado)) {
       return;
     }
     throw errorCapturado;
