@@ -6,6 +6,18 @@ import type { ErrorNegocio, EstadoHttpNegocio } from "../ventas/ventas.errors.js
 
 // --- CÓDIGO LEGIBLE POR MÁQUINA ---
 
+/** Valores posibles de `codigo` en los errores del módulo; la documentación OpenAPI toma de acá su lista. */
+export const CODIGOS_ERROR_CAMBIO = [
+  "DATOS_INVALIDOS",
+  "SALDO_NEGATIVO",
+  "VENTA_NO_ENCONTRADA",
+  "CAMBIO_NO_ENCONTRADO",
+  "SIN_CAJA_ABIERTA",
+  "STOCK_INSUFICIENTE",
+  "VENTA_NO_VINCULABLE",
+  "CANTIDAD_EXCEDE_VENTA",
+] as const;
+
 /**
  * Código con el que el front distingue el caso de un rechazo sin leer el texto del mensaje.
  * Es el enum `CodigoErrorCambio` del front, sin los valores que corresponden a la anulación y edición de cambios
@@ -13,15 +25,7 @@ import type { ErrorNegocio, EstadoHttpNegocio } from "../ventas/ventas.errors.js
  * El enum del front no tiene valores propios para "producto inexistente" ni "medio de pago inexistente":
  * esos 404 salen como `DATOS_INVALIDOS`.
  */
-export type CodigoErrorCambio =
-  | "DATOS_INVALIDOS"
-  | "SALDO_NEGATIVO"
-  | "VENTA_NO_ENCONTRADA"
-  | "CAMBIO_NO_ENCONTRADO"
-  | "SIN_CAJA_ABIERTA"
-  | "STOCK_INSUFICIENTE"
-  | "VENTA_NO_VINCULABLE"
-  | "CANTIDAD_EXCEDE_VENTA";
+export type CodigoErrorCambio = (typeof CODIGOS_ERROR_CAMBIO)[number];
 
 /**
  * Error de negocio del módulo de cambios: el de ventas más el `codigo` legible por máquina.

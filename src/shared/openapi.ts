@@ -1,9 +1,13 @@
 import { z } from "zod";
 import { iniciarSesionSchema } from "../modules/auth/auth.schemas.js";
+import { CODIGOS_ERROR_CAMBIO } from "../modules/cambios-mercaderia/cambios-mercaderia.errors.js";
 import {
   CANTIDAD_MAXIMA,
+  consultarCambioSchema,
   consultarHistorialCambiosSchema,
+  ID_CAMBIO_MAXIMO,
   ID_MEDIO_PAGO_MAXIMO,
+  MOTIVO_CAMBIO_LONGITUD_MAXIMA,
   registrarCambioSchema,
 } from "../modules/cambios-mercaderia/cambios-mercaderia.schemas.js";
 import { consultarProductosSchema, BUSQUEDA_LONGITUD_MAXIMA } from "../modules/inventario/inventario.schemas.js";
@@ -599,7 +603,28 @@ const ventaAnulada = {
 
 // --- CAMBIO DE MERCADERÍA ---
 
-/** Error de validación (400) del alta de un cambio: mismo formato, con el mensaje y los campos propios del body. */
+/** Propiedad `codigo` de los errores de cambios: legible por máquina, alineada con `CodigoErrorCambio` del front. */
+const propiedadCodigoErrorCambio = {
+  type: "string",
+  enum: [...CODIGOS_ERROR_CAMBIO],
+  example: "SALDO_NEGATIVO",
+  description:
+    "Caso del rechazo, para que el front no lea el texto del mensaje. Los 404 de producto o medio de pago inexistente salen como " +
+    "`DATOS_INVALIDOS` (el enum del front no tiene valores propios para esos dos casos). Los errores 401 y 403 de autenticación no lo traen",
+};
+
+/** Error de negocio (400/404/409) de cambios: el de siempre más `codigo`. */
+const errorNegocioCambio = {
+  type: "object",
+  properties: {
+    ...errorNegocio.properties,
+    mensaje: { type: "string", example: "El saldo a cobrar es 2000.00: se requiere un medio de pago" },
+    codigo: propiedadCodigoErrorCambio,
+  },
+  required: ["exito", "mensaje", "codigo"],
+};
+
+/** Error de validación (400) del alta de un cambio: mismo formato, con el mensaje, los campos propios del body y `codigo`. */
 const errorValidacionCambio = {
   ...errorValidacion,
   properties: {
@@ -610,13 +635,163 @@ const errorValidacionCambio = {
       items: {
         type: "object",
         properties: {
-          campo: { type: "string", example: "cantidadDevuelta" },
+          campo: { type: "string", example: "motivoCambio" },
           mensaje: { type: "string" },
         },
       },
     },
+    codigo: { type: "string", enum: ["DATOS_INVALIDOS"], example: "DATOS_INVALIDOS" },
   },
 };
+
+/** Persona del cambio: quien lo cargó (vendedor) o quien lo anuló. */
+const usuarioCambio = {
+  type: "object",
+  properties: {
+    idUsuario: { type: "integer", example: 2 },
+    nombre: { type: "string", example: "María López", description: "Nombre vigente" },
+  },
+  required: ["idUsuario", "nombre"],
+};
+
+/**
+ * Cambio completo (ver `CambioDetalle`): el contenido de `GET /api/cambios-mercaderia/{idCambio}` y la base de `cambio` en el `POST`.
+ * Cantidades como texto con 3 decimales e importes como texto con 2.
+ */
+const propiedadesCambioDetalle = {
+  idCambio: { type: "integer", example: 7 },
+  fechaHora: { type: "string", format: "date-time", example: "2026-11-13T15:20:00.000Z" },
+  estado: { type: "string", enum: ["ACTIVO", "ANULADO"] },
+  fechaHoraLimiteModificacion: {
+    type: "string",
+    format: "date-time",
+    nullable: true,
+    description: "`fechaHora` más los minutos de la ventana de anulación (15). Nulo si el cambio está ANULADO",
+  },
+  motivoCambio: {
+    type: "string",
+    nullable: true,
+    example: "El cliente cambia de marca por una alergia de la mascota",
+    description: "Texto del motivo, de hasta 200 caracteres. Nulo en los cambios anteriores a que se registrara",
+  },
+  ventaVinculada: {
+    type: "object",
+    nullable: true,
+    description: "Venta original. Nulo si el cambio es desvinculado",
+    properties: {
+      idVenta: { type: "integer", example: 42 },
+      numeroComprobante: {
+        type: "string",
+        nullable: true,
+        example: "CMP-00000042",
+        description: "Nulo solo en datos anteriores al backfill del comprobante",
+      },
+    },
+    required: ["idVenta", "numeroComprobante"],
+  },
+  articuloDevuelto: {
+    type: "object",
+    description: "Lo que entra: el artículo que devuelve el cliente",
+    properties: {
+      idProducto: { type: "integer", example: 1 },
+      nombreProducto: { type: "string", example: "Alimento balanceado perro adulto 15 kg", description: "Nombre vigente" },
+      formatoVenta: { type: "string", enum: ["UNIDAD", "GRANEL"] },
+      cantidadDevuelta: { type: "string", example: "1.000", description: "Unidades devueltas (bolsas enteras con bolsa abierta). Texto con 3 decimales" },
+      esBolsaAbierta: { type: "boolean", example: true },
+      precioUnitario: {
+        type: "string",
+        example: "60000.00",
+        description:
+          "Precio unitario congelado al registrar el cambio (con ticket, el pagado; sin ticket, el vigente). Con bolsa abierta es el precio de la BOLSA. Texto con 2 decimales",
+      },
+      subtotal: {
+        type: "string",
+        example: "58000.00",
+        description: "Crédito del devuelto. Con bolsa abierta, el de la fracción de bolsa devuelta. Texto con 2 decimales",
+      },
+    },
+    required: ["idProducto", "nombreProducto", "formatoVenta", "cantidadDevuelta", "esBolsaAbierta", "precioUnitario", "subtotal"],
+  },
+  productoStockIngresado: {
+    type: "object",
+    description: "Producto que recibió el stock: el devuelto, o su granel si fue bolsa abierta. Siempre viene",
+    properties: {
+      idProducto: { type: "integer", example: 3 },
+      nombreProducto: { type: "string", example: "Alimento balanceado perro adulto a granel", description: "Nombre vigente" },
+      cantidadStockIngresado: {
+        type: "string",
+        nullable: true,
+        example: "14.500",
+        description: "Kilos que ingresaron al granel. Solo con `esBolsaAbierta`; nulo en caso contrario. Texto con 3 decimales",
+      },
+    },
+    required: ["idProducto", "nombreProducto", "cantidadStockIngresado"],
+  },
+  articuloEntregado: {
+    type: "object",
+    description: "Lo que sale: el artículo que se lleva el cliente",
+    properties: {
+      idProducto: { type: "integer", example: 2 },
+      nombreProducto: { type: "string", example: "Alimento balanceado perro adulto 20 kg", description: "Nombre vigente" },
+      formatoVenta: { type: "string", enum: ["UNIDAD", "GRANEL"] },
+      cantidadEntregada: { type: "string", example: "1.000", description: "Texto con 3 decimales" },
+      precioUnitario: { type: "string", example: "60000.00", description: "Precio unitario congelado al registrar el cambio. Texto con 2 decimales" },
+      subtotal: { type: "string", example: "60000.00", description: "Precio unitario × cantidad, redondeado a centavos. Texto con 2 decimales" },
+    },
+    required: ["idProducto", "nombreProducto", "formatoVenta", "cantidadEntregada", "precioUnitario", "subtotal"],
+  },
+  valorDevuelto: { type: "string", example: "58000.00", description: "Crédito del producto devuelto (igual al subtotal del devuelto). Texto con 2 decimales" },
+  valorEntregado: { type: "string", example: "60000.00", description: "Valor de lo entregado (igual al subtotal del entregado). Texto con 2 decimales" },
+  saldoResultante: { type: "string", example: "2000.00", description: "Valor entregado menos valor devuelto: nunca negativo. Texto con 2 decimales" },
+  pagoSaldo: {
+    type: "object",
+    nullable: true,
+    description: "Cómo se cobró el saldo. Nulo si el cambio no tuvo saldo",
+    properties: {
+      idMedioPago: { type: "integer", example: 1 },
+      nombreMedioPago: { type: "string", example: "Efectivo", description: "Nombre vigente" },
+      montoRecibido: {
+        type: "string",
+        nullable: true,
+        example: "5000.00",
+        description: "Solo efectivo con monto informado; nulo en otro caso y en cambios anteriores. Texto con 2 decimales",
+      },
+      vuelto: { type: "string", nullable: true, example: "3000.00", description: "Monto recibido menos saldo, calculado por el servidor. Texto con 2 decimales" },
+    },
+    required: ["idMedioPago", "nombreMedioPago", "montoRecibido", "vuelto"],
+  },
+  vendedor: { ...usuarioCambio, description: "Usuario que cargó el cambio (el del token)" },
+  anulacion: {
+    type: "object",
+    nullable: true,
+    description: "Auditoría de la anulación. Nulo mientras el cambio no está ANULADO o si se anuló antes de que se registrara la auditoría",
+    properties: {
+      fechaHora: { type: "string", format: "date-time" },
+      usuario: usuarioCambio,
+      motivo: { type: "string", example: "Cambio cargado dos veces" },
+    },
+    required: ["fechaHora", "usuario", "motivo"],
+  },
+};
+
+/** Campos requeridos del cambio completo. */
+const requeridosCambioDetalle = [
+  "idCambio",
+  "fechaHora",
+  "estado",
+  "fechaHoraLimiteModificacion",
+  "motivoCambio",
+  "ventaVinculada",
+  "articuloDevuelto",
+  "productoStockIngresado",
+  "articuloEntregado",
+  "valorDevuelto",
+  "valorEntregado",
+  "saldoResultante",
+  "pagoSaldo",
+  "vendedor",
+  "anulacion",
+];
 
 /** Respuesta exitosa de `POST /api/cambios-mercaderia` (ver `RegistrarCambioResponse`). */
 const cambioRegistrado = {
@@ -624,41 +799,44 @@ const cambioRegistrado = {
   properties: {
     exito: { type: "boolean", example: true },
     mensaje: { type: "string", example: "Cambio registrado, stock actualizado y saldo asentado en caja" },
+    fechaHoraServidor: {
+      type: "string",
+      format: "date-time",
+      description: "Hora del servidor al responder (ISO 8601). El front la compara con `cambio.fechaHoraLimiteModificacion`",
+    },
     cambio: {
       type: "object",
+      description:
+        "El mismo contenido que `GET /api/cambios-mercaderia/{idCambio}` (releído dentro de la misma transacción del alta) " +
+        "más los campos planos que el alta ya devolvía, que se conservan",
       properties: {
-        idCambio: { type: "integer", example: 7 },
-        fechaHora: { type: "string", format: "date-time", example: "2026-11-13T15:20:00.000Z" },
-        estado: { type: "string", enum: ["ACTIVO"], example: "ACTIVO" },
+        ...propiedadesCambioDetalle,
         idVentaOriginal: { type: "integer", nullable: true, example: 42, description: "Nulo si el cambio no está vinculado a un ticket" },
         idProductoDevuelto: { type: "integer", example: 1 },
         cantidadDevuelta: { type: "string", example: "1.000", description: "Texto con 3 decimales" },
-        esBolsaAbierta: { type: "boolean", example: false },
+        esBolsaAbierta: { type: "boolean", example: true },
         precioUnitarioDevuelto: {
           type: "string",
-          example: "1500.00",
-          description: "Con ticket, el precio al que se vendió; sin ticket, el vigente. Texto con 2 decimales",
+          example: "60000.00",
+          description: "Con ticket, el precio al que se vendió; sin ticket, el vigente. Con bolsa abierta, el de la bolsa. Texto con 2 decimales",
         },
         idProductoStockIngresado: {
           type: "integer",
-          example: 1,
+          example: 3,
           description: "Producto cuyo stock recibe el ingreso: el devuelto, o su granel si es bolsa abierta",
         },
         cantidadStockIngresado: {
           type: "string",
-          example: "1.000",
-          description: "Unidades del producto ingresado, o kilos si `esBolsaAbierta`. Texto con 3 decimales",
+          example: "14.500",
+          description: "Unidades del producto ingresado, o kilos (el peso devuelto) si `esBolsaAbierta`. Texto con 3 decimales",
         },
         idProductoEntregado: { type: "integer", example: 2 },
-        cantidadEntregada: { type: "string", example: "2.500", description: "Texto con 3 decimales" },
-        precioUnitarioEntregado: { type: "string", example: "800.00", description: "Texto con 2 decimales" },
-        saldoResultante: { type: "string", example: "500.00", description: "Diferencia a favor del local. Texto con 2 decimales" },
+        cantidadEntregada: { type: "string", example: "1.000", description: "Texto con 3 decimales" },
+        precioUnitarioEntregado: { type: "string", example: "60000.00", description: "Texto con 2 decimales" },
         idMedioPago: { type: "integer", nullable: true, example: 1, description: "Nulo si el saldo es 0" },
       },
       required: [
-        "idCambio",
-        "fechaHora",
-        "estado",
+        ...requeridosCambioDetalle,
         "idVentaOriginal",
         "idProductoDevuelto",
         "cantidadDevuelta",
@@ -669,12 +847,60 @@ const cambioRegistrado = {
         "idProductoEntregado",
         "cantidadEntregada",
         "precioUnitarioEntregado",
-        "saldoResultante",
         "idMedioPago",
       ],
     },
   },
-  required: ["exito", "mensaje", "cambio"],
+  required: ["exito", "mensaje", "fechaHoraServidor", "cambio"],
+};
+
+// --- DETALLE DE UN CAMBIO ---
+
+/** Error de validación (400) del parámetro de ruta del detalle de un cambio: mismo formato, con su mensaje y `codigo`. */
+const errorValidacionConsultaCambio = {
+  ...errorValidacion,
+  properties: {
+    ...errorValidacion.properties,
+    mensaje: { type: "string", example: "Parámetros de consulta inválidos" },
+    errores: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          campo: { type: "string", example: "idCambio" },
+          mensaje: { type: "string" },
+        },
+      },
+    },
+    codigo: { type: "string", enum: ["DATOS_INVALIDOS"], example: "DATOS_INVALIDOS" },
+  },
+};
+
+/** Respuesta 404 de `GET /api/cambios-mercaderia/{idCambio}`: el cambio no existe. */
+const cambioInexistente = {
+  type: "object",
+  properties: {
+    exito: { type: "boolean", example: false },
+    mensaje: { type: "string", example: "El cambio 999 no existe" },
+    codigo: { type: "string", enum: ["CAMBIO_NO_ENCONTRADO"], example: "CAMBIO_NO_ENCONTRADO" },
+  },
+  required: ["exito", "mensaje", "codigo"],
+};
+
+/** Respuesta exitosa de `GET /api/cambios-mercaderia/{idCambio}` (ver `ConsultarCambioResponse`). */
+const cambioConsultado = {
+  type: "object",
+  properties: {
+    exito: { type: "boolean", example: true },
+    fechaHoraServidor: {
+      type: "string",
+      format: "date-time",
+      description:
+        "Hora del servidor al responder (ISO 8601), tomada después de leer. El front la compara con `cambio.fechaHoraLimiteModificacion`",
+    },
+    cambio: { type: "object", properties: propiedadesCambioDetalle, required: requeridosCambioDetalle },
+  },
+  required: ["exito", "fechaHoraServidor", "cambio"],
 };
 
 // --- HISTORIAL DE CAMBIOS ---
@@ -802,6 +1028,16 @@ const parametroIdVenta = {
   required: true,
   description: `Id de la venta: entero positivo (máximo ${ID_VENTA_MAXIMO}), por ejemplo el que devuelve el historial.`,
   schema: (esquemaConsultaVenta.properties ?? {}).idVenta,
+};
+
+// El parámetro se deriva del esquema Zod real, igual que el de la venta, para que no se desactualice
+const esquemaConsultaCambio = z.toJSONSchema(consultarCambioSchema, { io: "input", target: "draft-7" });
+const parametroIdCambio = {
+  name: "idCambio",
+  in: "path",
+  required: true,
+  description: `Id del cambio: entero positivo (máximo ${ID_CAMBIO_MAXIMO}), por ejemplo el que devuelve el historial de cambios.`,
+  schema: (esquemaConsultaCambio.properties ?? {}).idCambio,
 };
 
 // --- PARÁMETROS DEL HISTORIAL ---
@@ -1352,18 +1588,28 @@ export const openapiDocument = {
           "Ingresa el stock del devuelto, descuenta el del entregado y registra el cambio en una única transacción. " +
           "El usuario es el del token: un `idUsuario` en el body se ignora sin error. " +
           `Las cantidades admiten hasta 3 decimales y no pueden superar ${CANTIDAD_MAXIMA}; un producto por unidad exige cantidad entera. ` +
+          `**Motivo:** \`motivoCambio\` es obligatorio: texto de 1 a ${MOTIVO_CAMBIO_LONGITUD_MAXIMA} caracteres tras recortar los espacios de los extremos (el front arma el texto a partir del motivo elegido). ` +
           "**Bolsa abierta (`esBolsaAbierta`):** solo si el devuelto es por unidad y tiene un producto a granel activo asociado y un peso unitario cargado " +
-          "(`permiteBolsaAbierta` en `GET /api/productos`). Los kilos que se suman al granel salen del peso del producto, no los informa el vendedor: " +
-          "`cantidadStockIngresado` = `cantidadDevuelta` × peso. Con bolsa cerrada ingresa el mismo producto y `cantidadStockIngresado` = `cantidadDevuelta`. " +
-          "**Precios:** el devuelto con ticket vale lo que se pagó por él (el precio del detalle, sin prorratear el descuento manual de la venta); " +
-          "sin ticket y el entregado, el precio vigente. **Saldo:** entregado menos devuelto, calculado por el servidor. " +
-          "Negativo es 400 (no hay reembolsos); 0 deja `idMedioPago` nulo e ignora el del body; mayor a 0 exige `idMedioPago` de un medio activo, " +
-          "sin recargo, descuento ni vuelto. El ingreso queda en la última caja abierta (`idCaja` + `saldoResultante`); no se modifica el saldo de la caja. " +
+          "(`permiteBolsaAbierta` en `GET /api/productos`). `cantidadDevuelta` son bolsas enteras y `pesoDevuelto` (opcional, solo con bolsa abierta; con `esBolsaAbierta` falso es 400) son los kilos que se devuelven en total: " +
+          "debe ser mayor que 0 y no superar el peso nominal (peso unitario × `cantidadDevuelta`); sin él se usa el peso nominal. " +
+          "El granel recibe esos kilos y `cantidadStockIngresado` los guarda. Con bolsa cerrada ingresa el mismo producto y `cantidadStockIngresado` = `cantidadDevuelta`. " +
+          "**Precios y crédito:** el devuelto con ticket vale lo que se pagó por él (el precio del detalle, sin prorratear el descuento manual de la venta); " +
+          "sin ticket y el entregado, el precio vigente. El crédito de una bolsa abierta es el precio de la BOLSA (nunca el del granel) por la fracción devuelta: " +
+          "`precio de la bolsa × (pesoDevuelto ÷ peso unitario)`, con Decimal exacto y un solo redondeo a 2 decimales (la mitad hacia arriba). " +
+          "Ejemplo: bolsa de 15 kg a 60000 que vuelve con 14,5 kg → crédito 58000; si el cliente se lleva otra de 60000, el saldo es 2000. " +
+          "**Saldo:** entregado menos devuelto, calculado por el servidor. " +
+          "Negativo es 400 (no hay reembolsos); 0 deja `idMedioPago`, `montoRecibido` y vuelto nulos e ignora los del body; mayor a 0 exige `idMedioPago` de un medio activo, " +
+          "sin recargo ni descuento. **Efectivo:** `montoRecibido` solo se admite con un medio en efectivo y saldo mayor que 0 (con otro medio es 400) y debe ser mayor o igual al saldo; " +
+          "el servidor calcula el `vuelto` (recibido − saldo). Mismas reglas y mensajes que el cobro de una venta. El `vuelto` no viaja en el body. " +
+          "El ingreso queda en la última caja abierta (`idCaja` + `saldoResultante`); no se modifica el saldo de la caja. " +
           "**Ticket vinculado:** la venta debe estar `COMPLETADA` (409 si está `ANULADA` o `PENDIENTE_PAGO`), el producto devuelto debe figurar en sus detalles (400) " +
           "y la cantidad no puede superar lo vendido menos lo ya devuelto en cambios activos de ese ticket (409). No hay límite de tiempo para dar de alta un cambio sobre un ticket viejo. " +
           "No emite comprobante. " +
-          "Orden de evaluación: 400 (formato), 404 (producto devuelto, entregado, venta), 400 (entregado inactivo, cantidades, bolsa abierta), " +
-          "ticket (409 estado, 400 producto ausente, 409 cantidad), saldo y medio de pago (400, 404), 409 (sin caja abierta), 409 (stock insuficiente del entregado). " +
+          "**Respuesta:** `cambio` trae el mismo contenido que `GET /api/cambios-mercaderia/{idCambio}` (releído dentro de la misma transacción) más los campos planos que el alta ya devolvía, y `fechaHoraServidor` en la raíz. " +
+          "**Errores:** todos traen `codigo`, legible por máquina (`DATOS_INVALIDOS`, `SALDO_NEGATIVO`, `VENTA_NO_ENCONTRADA`, `VENTA_NO_VINCULABLE`, `CANTIDAD_EXCEDE_VENTA`, `SIN_CAJA_ABIERTA`, `STOCK_INSUFICIENTE`); " +
+          "producto o medio de pago inexistente es 404 con `DATOS_INVALIDOS`. " +
+          "Orden de evaluación: 400 (formato), 404 (producto devuelto, entregado, venta), 400 (entregado inactivo, cantidades, bolsa abierta y peso), " +
+          "ticket (409 estado, 400 producto ausente, 409 cantidad), saldo, medio de pago y efectivo (400, 404), 409 (sin caja abierta), 409 (stock insuficiente del entregado). " +
           "Ante cualquier fallo no queda nada escrito.",
         requestBody: {
           required: true,
@@ -1381,19 +1627,52 @@ export const openapiDocument = {
           },
           "400": {
             description:
-              "Body inválido, o regla de negocio incumplida: entregado inactivo, cantidad con decimales en un producto por unidad, " +
-              "bolsa abierta no admitida, producto devuelto ausente en el ticket, saldo negativo, saldo mayor a 0 sin medio de pago o con medio inactivo",
-            content: { "application/json": { schema: { oneOf: [errorValidacionCambio, errorNegocio] } } },
+              "Body inválido (incluidos `motivoCambio` ausente o vacío y `pesoDevuelto` sin bolsa abierta), o regla de negocio incumplida: entregado inactivo, cantidad con decimales en un producto por unidad, " +
+              "bolsa abierta no admitida, peso devuelto mayor al nominal, producto devuelto ausente en el ticket, saldo negativo (`SALDO_NEGATIVO`), saldo mayor a 0 sin medio de pago o con medio inactivo, " +
+              "monto recibido con un medio que no es efectivo o menor al saldo",
+            content: { "application/json": { schema: { oneOf: [errorValidacionCambio, errorNegocioCambio] } } },
           },
           "404": {
-            description: "Producto devuelto, producto entregado, venta vinculada o medio de pago inexistente",
-            content: { "application/json": { schema: errorNegocio } },
+            description: "Producto devuelto, producto entregado o medio de pago inexistente (`DATOS_INVALIDOS`), o venta vinculada inexistente (`VENTA_NO_ENCONTRADA`)",
+            content: { "application/json": { schema: errorNegocioCambio } },
           },
           "409": {
             description:
-              "Venta vinculada anulada o pendiente de pago, cantidad a devolver mayor a la disponible del ticket, " +
-              "no hay una caja abierta o stock insuficiente del producto entregado",
-            content: { "application/json": { schema: errorNegocio } },
+              "Venta vinculada anulada o pendiente de pago (`VENTA_NO_VINCULABLE`), cantidad a devolver mayor a la disponible del ticket (`CANTIDAD_EXCEDE_VENTA`), " +
+              "no hay una caja abierta (`SIN_CAJA_ABIERTA`) o stock insuficiente del producto entregado (`STOCK_INSUFICIENTE`)",
+            content: { "application/json": { schema: errorNegocioCambio } },
+          },
+          ...respuestasProteccion,
+        },
+      },
+    },
+    "/api/cambios-mercaderia/{idCambio}": {
+      get: {
+        tags: ["Ventas"],
+        security: [{ bearerAuth: [] }],
+        summary: "Consultar un cambio de mercadería (detalle)",
+        description:
+          "Detalle de un cambio, en cualquier estado. Trae la venta vinculada (nula si es desvinculado), el artículo devuelto y el entregado con su precio unitario y subtotal, " +
+          "el producto que recibió el stock (el devuelto, o el granel si fue bolsa abierta; con la cantidad solo si fue bolsa abierta), " +
+          "los valores (`valorDevuelto`, `valorEntregado` y `saldoResultante`), el pago del saldo (`pagoSaldo`: medio, `montoRecibido` y `vuelto`; nulo si no hubo saldo), el vendedor y `anulacion` " +
+          "(fecha, usuario y motivo; nula mientras el cambio no esté anulado). `motivoCambio` es nulo en los cambios anteriores a que se registrara, y también lo son `montoRecibido` y `vuelto`. " +
+          "El crédito del devuelto sale de restar el saldo al valor de lo entregado, así que es exacto aunque el peso del producto cambie después. " +
+          "Los nombres son los vigentes. `fechaHoraLimiteModificacion` es la fecha del cambio más 15 minutos (nula si está ANULADO) y la raíz trae `fechaHoraServidor` para evaluarla con la hora del servidor. " +
+          "Las lecturas salen de la misma foto de la base. Solo lectura: no modifica stock, caja ni estado. " +
+          "Requiere sesión (roles VENDEDOR, GESTOR_COMERCIAL o GERENTE); no exige caja abierta.",
+        parameters: [parametroIdCambio],
+        responses: {
+          "200": {
+            description: "Detalle del cambio",
+            content: { "application/json": { schema: cambioConsultado } },
+          },
+          "400": {
+            description: "`idCambio` inválido (no es un entero positivo): `codigo` `DATOS_INVALIDOS`",
+            content: { "application/json": { schema: errorValidacionConsultaCambio } },
+          },
+          "404": {
+            description: "El cambio no existe (`CAMBIO_NO_ENCONTRADO`)",
+            content: { "application/json": { schema: cambioInexistente } },
           },
           ...respuestasProteccion,
         },
