@@ -21,11 +21,13 @@ export async function buscarProductosActivos(busqueda: string | undefined): Prom
       // Sin condición de nombre cuando no hay búsqueda: se devuelve todo el catálogo activo
       ...(busqueda !== undefined && { nombre: { contains: busqueda, mode: "insensitive" } }),
     },
-    // Select explícito: payload liviano y sin exponer costo, categoría ni código de barras.
+    // Select explícito: payload liviano y sin exponer costo ni código de barras.
+    // La categoría trae solo su nombre vigente, en la misma consulta (sin N+1).
     // El peso y el granel asociado (id y nombre vigente) salen en la respuesta y además deciden `permiteBolsaAbierta`
     select: {
       idProducto: true,
       nombre: true,
+      categoria: { select: { nombre: true } },
       precioVenta: true,
       stockFisico: true,
       formatoVenta: true,
