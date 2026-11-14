@@ -822,8 +822,9 @@ const descripcionesParametrosHistorial: Record<string, string> = {
   origen: "Solo ventas con este origen (MOSTRADOR o DIGITAL).",
   medioPago:
     `Id de un medio de pago (entero positivo, máximo ${ID_MEDIO_PAGO_MAXIMO}) o el literal \`${VALOR_MEDIO_PAGO_MIXTO}\` en mayúsculas. ` +
-    "Con un id: ventas con al menos un pago con ese medio (una venta mixta que lo usó también coincide). " +
-    `Con \`${VALOR_MEDIO_PAGO_MIXTO}\`: ventas con más de un pago. Un fiado pendiente no tiene pagos, así que no coincide con ninguno.`,
+    "Con un id: solo las ventas con exactamente un pago, y que ese pago sea de ese medio. " +
+    `Con \`${VALOR_MEDIO_PAGO_MIXTO}\`: ventas con más de un pago. Las ventas mixtas salen únicamente con \`${VALOR_MEDIO_PAGO_MIXTO}\` ` +
+    "(nunca con un id): ambos filtros son conjuntos disjuntos. Un fiado pendiente no tiene pagos, así que no coincide con ninguno.",
   textoCliente:
     `Texto contenido en la referencia del cliente (máximo ${TEXTO_CLIENTE_LONGITUD_MAXIMA} caracteres), sin distinguir mayúsculas. ` +
     "Las ventas sin cliente no coinciden. Vacío equivale a no filtrar. Los caracteres `%` y `_` actúan como comodines.",
