@@ -17,8 +17,11 @@ import {
   ID_VENTA_MAXIMO,
   liquidarFiadoSchema,
   MONTO_RECIBIDO_MAXIMO,
+  NUMERO_COMPROBANTE_LONGITUD_MAXIMA,
   PAGINA_MAXIMA,
   registrarVentaSchema,
+  TEXTO_CLIENTE_LONGITUD_MAXIMA,
+  VALOR_MEDIO_PAGO_MIXTO,
 } from "../modules/ventas/ventas.schemas.js";
 
 // --- ESQUEMAS REUTILIZABLES ---
@@ -207,6 +210,13 @@ const historialConsultado = {
   type: "object",
   properties: {
     exito: { type: "boolean", example: true },
+    fechaHoraServidor: {
+      type: "string",
+      format: "date-time",
+      description:
+        "Hora del servidor al responder (ISO 8601), tomada después de leer. El front la compara con `fechaHoraLimiteModificacion` " +
+        "para saber si la ventana de edición o anulación sigue abierta",
+    },
     ventas: {
       type: "array",
       items: {
@@ -221,12 +231,36 @@ const historialConsultado = {
           },
           fechaHora: { type: "string", format: "date-time" },
           estado: { type: "string", enum: ["COMPLETADA", "PENDIENTE_PAGO", "ANULADA"] },
+          fechaHoraLimiteModificacion: {
+            type: "string",
+            format: "date-time",
+            nullable: true,
+            description:
+              "Hasta cuándo se puede editar o anular: 15 minutos desde el pago (o desde la venta si no hay pago, como en un fiado pendiente). " +
+              "Misma regla que la anulación. Nulo si la venta está ANULADA",
+          },
           montoTotal: { type: "string", example: "1425.00" },
           clienteReferencia: { type: "string", nullable: true, example: "Maria Lopez" },
           origen: { type: "string", enum: ["MOSTRADOR", "DIGITAL"] },
           modalidadEntrega: { type: "string", enum: ["RETIRO", "ENVIO"] },
+          cantidadCambiosActivos: {
+            type: "integer",
+            example: 1,
+            description: "Cambios de mercadería con estado ACTIVO vinculados a la venta; 0 si no hay",
+          },
         },
-        required: ["idVenta", "numeroComprobante", "fechaHora", "estado", "montoTotal", "clienteReferencia", "origen", "modalidadEntrega"],
+        required: [
+          "idVenta",
+          "numeroComprobante",
+          "fechaHora",
+          "estado",
+          "fechaHoraLimiteModificacion",
+          "montoTotal",
+          "clienteReferencia",
+          "origen",
+          "modalidadEntrega",
+          "cantidadCambiosActivos",
+        ],
       },
     },
     paginacion: {
@@ -240,7 +274,7 @@ const historialConsultado = {
       required: ["pagina", "cantidadPorPagina", "totalRegistros", "totalPaginas"],
     },
   },
-  required: ["exito", "ventas", "paginacion"],
+  required: ["exito", "fechaHoraServidor", "ventas", "paginacion"],
 };
 
 /** Error de validación (400) del parámetro de ruta de la consulta de una venta: mismo formato, con su mensaje propio. */
@@ -276,6 +310,12 @@ const ventaConsultada = {
   type: "object",
   properties: {
     exito: { type: "boolean", example: true },
+    fechaHoraServidor: {
+      type: "string",
+      format: "date-time",
+      description:
+        "Hora del servidor al responder (ISO 8601), tomada después de leer. El front la compara con `venta.fechaHoraLimiteModificacion`",
+    },
     venta: {
       type: "object",
       properties: {
@@ -299,6 +339,14 @@ const ventaConsultada = {
           description:
             "COMPLETADA = ticket de pago (pagos y fechaHoraPago con valor). PENDIENTE_PAGO = ticket de deuda " +
             "(pagos vacío y fechaHoraPago nulo). ANULADA se devuelve tal como quedó guardada",
+        },
+        fechaHoraLimiteModificacion: {
+          type: "string",
+          format: "date-time",
+          nullable: true,
+          description:
+            "Hasta cuándo se puede editar o anular: 15 minutos desde `fechaHoraPago` (o desde `fechaHora` si no hay pago). " +
+            "Misma regla que la anulación y que el historial. Nulo si la venta está ANULADA",
         },
         origen: { type: "string", enum: ["MOSTRADOR", "DIGITAL"] },
         modalidadEntrega: { type: "string", enum: ["RETIRO", "ENVIO"] },
@@ -331,8 +379,16 @@ const ventaConsultada = {
               cantidad: { type: "string", example: "2.500", description: "Texto con 3 decimales" },
               precioUnitario: { type: "string", example: "600.00", description: "Precio congelado al registrar la venta" },
               subtotal: { type: "string", example: "1500.00" },
+              cantidadYaDevuelta: {
+                type: "string",
+                example: "1.000",
+                description:
+                  "Lo ya devuelto de este producto en cambios ACTIVOS vinculados a la venta, texto con 3 decimales (\"0.000\" si nada). " +
+                  "Es el total del producto: si figura en más de una línea (datos antiguos), todas llevan el mismo valor. " +
+                  "Mismo criterio que el tope de cantidad del alta de cambios",
+              },
             },
-            required: ["idProducto", "nombreProducto", "formatoVenta", "cantidad", "precioUnitario", "subtotal"],
+            required: ["idProducto", "nombreProducto", "formatoVenta", "cantidad", "precioUnitario", "subtotal", "cantidadYaDevuelta"],
           },
         },
         pagos: {
@@ -394,6 +450,7 @@ const ventaConsultada = {
         "fechaHora",
         "fechaHoraPago",
         "estado",
+        "fechaHoraLimiteModificacion",
         "origen",
         "modalidadEntrega",
         "clienteReferencia",
@@ -408,7 +465,7 @@ const ventaConsultada = {
       ],
     },
   },
-  required: ["exito", "venta"],
+  required: ["exito", "fechaHoraServidor", "venta"],
 };
 
 // --- COBRO DE FIADO ---
@@ -762,6 +819,18 @@ const descripcionesParametrosHistorial: Record<string, string> = {
     "Día final inclusivo (AAAA-MM-DD), interpretado en hora de Argentina (UTC-3): hasta las 23:59:59 de ese día. No puede ser anterior a fechaDesde.",
   idProducto: `Entero positivo (máximo ${ID_PRODUCTO_MAXIMO}). Solo ventas que contienen este producto en sus detalles.`,
   estado: "Solo ventas en este estado. Sin este filtro se devuelven todas, incluidas las anuladas.",
+  origen: "Solo ventas con este origen (MOSTRADOR o DIGITAL).",
+  medioPago:
+    `Id de un medio de pago (entero positivo, máximo ${ID_MEDIO_PAGO_MAXIMO}) o el literal \`${VALOR_MEDIO_PAGO_MIXTO}\` en mayúsculas. ` +
+    "Con un id: solo las ventas con exactamente un pago, y que ese pago sea de ese medio. " +
+    `Con \`${VALOR_MEDIO_PAGO_MIXTO}\`: ventas con más de un pago. Las ventas mixtas salen únicamente con \`${VALOR_MEDIO_PAGO_MIXTO}\` ` +
+    "(nunca con un id): ambos filtros son conjuntos disjuntos. Un fiado pendiente no tiene pagos, así que no coincide con ninguno.",
+  textoCliente:
+    `Texto contenido en la referencia del cliente (máximo ${TEXTO_CLIENTE_LONGITUD_MAXIMA} caracteres), sin distinguir mayúsculas. ` +
+    "Las ventas sin cliente no coinciden. Vacío equivale a no filtrar. Los caracteres `%` y `_` actúan como comodines.",
+  numeroComprobante:
+    `Texto contenido en el número de comprobante (máximo ${NUMERO_COMPROBANTE_LONGITUD_MAXIMA} caracteres), sin distinguir mayúsculas. ` +
+    "Coincidencia parcial, no exacta. Vacío equivale a no filtrar. Los caracteres `%` y `_` actúan como comodines.",
 };
 
 // Los parámetros se derivan del esquema Zod real (io "input" = lo que envía el cliente), así no se desactualizan
@@ -827,8 +896,36 @@ const productosConsultados = {
             description:
               "Si el producto admite devolverse como bolsa abierta en un cambio: es UNIDAD, tiene un producto a granel activo asociado y un peso unitario cargado",
           },
+          idProductoGranel: {
+            type: "integer",
+            nullable: true,
+            example: 4,
+            description: "Id del producto a granel vinculado; nulo si no tiene. Se informa aunque ese granel esté inactivo",
+          },
+          nombreProductoGranel: {
+            type: "string",
+            nullable: true,
+            example: "Alimento balanceado perro adulto a granel",
+            description: "Nombre vigente del producto a granel vinculado; nulo si no tiene",
+          },
+          pesoUnitario: {
+            type: "string",
+            nullable: true,
+            example: "3.000",
+            description: "Kilos por unidad, texto con 3 decimales; nulo si no está cargado",
+          },
         },
-        required: ["idProducto", "nombre", "precioVenta", "stockFisico", "formatoVenta", "permiteBolsaAbierta"],
+        required: [
+          "idProducto",
+          "nombre",
+          "precioVenta",
+          "stockFisico",
+          "formatoVenta",
+          "permiteBolsaAbierta",
+          "idProductoGranel",
+          "nombreProductoGranel",
+          "pesoUnitario",
+        ],
       },
     },
   },
@@ -947,7 +1044,8 @@ export const openapiDocument = {
         description:
           "Devuelve solo productos con estado ACTIVO, sin filtrar por stock (el alta de venta valida el stock). " +
           "Sin paginación. Orden: nombre ascendente y id ascendente como desempate. Sin coincidencias devuelve 200 con lista vacía. " +
-          "No expone costo, categoría ni código de barras. Cada producto trae `permiteBolsaAbierta`, la misma regla que valida el alta de un cambio. " +
+          "No expone costo, categoría ni código de barras. Cada producto trae `permiteBolsaAbierta`, la misma regla que valida el alta de un cambio, " +
+          "y los datos de su granel vinculado (`idProductoGranel`, `nombreProductoGranel`) y `pesoUnitario`, nulos si no aplican. " +
           "Requiere sesión (roles VENDEDOR, GESTOR_COMERCIAL o GERENTE); no exige caja abierta.",
         parameters: [parametroBusqueda],
         responses: {
@@ -988,7 +1086,9 @@ export const openapiDocument = {
         summary: "Consultar el historial de ventas (paginado, con filtros)",
         description:
           "Alimenta la grilla del historial. Orden fijo: fecha descendente con desempate por id descendente. " +
-          "Los filtros son opcionales y se combinan con AND. Una página fuera de rango devuelve 200 con lista vacía. " +
+          "Los filtros son opcionales y se combinan con AND (fechas, producto, estado, origen, medio de pago, cliente y comprobante). " +
+          "Una página fuera de rango devuelve 200 con lista vacía. " +
+          "Cada venta trae `fechaHoraLimiteModificacion` y `cantidadCambiosActivos`, y la raíz `fechaHoraServidor`. " +
           "No incluye detalles ni pagos de cada venta. Requiere sesión (roles VENDEDOR, GESTOR_COMERCIAL o GERENTE); no exige caja abierta.",
         parameters: parametrosHistorial,
         responses: {
@@ -997,7 +1097,9 @@ export const openapiDocument = {
             content: { "application/json": { schema: historialConsultado } },
           },
           "400": {
-            description: "Parámetros de consulta inválidos (formato, rango, fecha inexistente o rango de fechas invertido)",
+            description:
+              "Parámetros de consulta inválidos (formato, rango, fecha inexistente, rango de fechas invertido, `origen` fuera de MOSTRADOR/DIGITAL, " +
+              "`medioPago` que no es un id positivo ni `MIXTO` en mayúsculas, o `textoCliente` / `numeroComprobante` más largos que su máximo)",
             content: { "application/json": { schema: errorValidacionConsulta } },
           },
           ...respuestasProteccion,
@@ -1061,6 +1163,7 @@ export const openapiDocument = {
           "El tipo de comprobante se deduce de `estado`. No devuelve el costo congelado. " +
           "Devuelve `motivoDescuento` (nivel venta) y, en cada pago, `montoRecibido` y `vuelto`; son nulos en ventas anteriores o cuando no aplican. " +
           "Devuelve `anulacion` (fecha, motivo y usuario que anuló), nula si la venta no está ANULADA o se anuló antes de que se registrara la auditoría. " +
+          "Devuelve `fechaHoraServidor` en la raíz, `venta.fechaHoraLimiteModificacion` (nula si está ANULADA) y, por ítem, `cantidadYaDevuelta`. " +
           "Solo lectura: no modifica stock, caja ni estado. Cualquier rol autorizado ve cualquier venta " +
           "(VENDEDOR, GESTOR_COMERCIAL o GERENTE); no exige caja abierta.",
         parameters: [parametroIdVenta],

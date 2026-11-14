@@ -69,6 +69,10 @@ function convertirProducto(producto: ProductoLeido): ProductoCatalogo {
           ? null
           : { formatoVenta: producto.productoGranel.formatoVenta, activo: producto.productoGranel.estado === "ACTIVO" },
     }),
+    // El granel vinculado se informa tal cual, aunque esté inactivo: `permiteBolsaAbierta` ya dice si se puede usar
+    idProductoGranel: producto.idProductoGranel,
+    nombreProductoGranel: producto.productoGranel === null ? null : producto.productoGranel.nombre,
+    pesoUnitario: producto.pesoUnitario === null ? null : producto.pesoUnitario.toFixed(3),
   };
 }
 

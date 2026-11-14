@@ -30,6 +30,22 @@ type OperacionStock = {
 /** Desempate de dos operaciones sobre el mismo producto: primero se descuenta y después se ingresa. */
 const ORDEN_DE_TIPO_DE_OPERACION: Record<OperacionStock["tipo"], number> = { DESCUENTO: 0, INGRESO: 1 };
 
+// --- CONDICIÓN DE CAMBIOS ACTIVOS DE UNA VENTA ---
+
+/**
+ * Condición de los cambios que cuentan como "ya devuelto" de una venta: los vinculados a ella y en estado ACTIVO.
+ * Es la única definición de ese criterio: la comparten el tope de cantidad del alta y las consultas de ventas
+ * (cantidad de cambios activos y cantidad ya devuelta por ítem), para que no diverjan.
+ * Un cambio ANULADO no cuenta: al anularse, vuelve a quedar disponible lo que había devuelto.
+ * @param idVentaOriginal Una venta, o varias (`{ in: [...] }`) para consultar por lote.
+ * @returns Fragmento de `where`; el llamador le suma sus propios filtros (por ejemplo, el producto devuelto).
+ */
+export function construirCondicionCambiosActivos(
+  idVentaOriginal: number | { in: number[] },
+): Prisma.CambioMercaderiaWhereInput {
+  return { idVentaOriginal, estado: "ACTIVO" };
+}
+
 // --- ALTA DE CAMBIO ---
 
 /**
@@ -97,7 +113,10 @@ export async function registrarCambioAtomico(
     if (ventaOriginal !== null) {
       const acumulado = await transaccion.cambioMercaderia.aggregate({
         _sum: { cantidadDevuelta: true },
-        where: { idVentaOriginal: ventaOriginal.idVenta, idProductoDevuelto: input.idProductoDevuelto, estado: "ACTIVO" },
+        where: {
+          ...construirCondicionCambiosActivos(ventaOriginal.idVenta),
+          idProductoDevuelto: input.idProductoDevuelto,
+        },
       });
       cantidadYaDevueltaMilesimas =
         acumulado._sum.cantidadDevuelta === null ? 0 : aMilesimas(acumulado._sum.cantidadDevuelta);

@@ -22,6 +22,8 @@ export type FormatoVenta = "UNIDAD" | "GRANEL";
 
 /** Producto GRANEL asociado a un producto por unidad, tal como lo lee el repository. */
 export type ProductoGranelLeido = {
+  /** Nombre vigente del granel: no se congela en ningún registro. */
+  nombre: string;
   formatoVenta: FormatoVenta;
   estado: "ACTIVO" | "INACTIVO";
 };
@@ -33,8 +35,10 @@ export type ProductoLeido = {
   precioVenta: DecimalExacto;
   stockFisico: DecimalExacto;
   formatoVenta: FormatoVenta;
-  /** Kilos por unidad; nulo si no aplica o no está cargado. No se expone: solo alimenta `permiteBolsaAbierta`. */
+  /** Kilos por unidad; nulo si no aplica o no está cargado. Se expone y además alimenta `permiteBolsaAbierta`. */
   pesoUnitario: DecimalExacto | null;
+  /** Id del producto GRANEL asociado (la columna del propio producto); nulo si no tiene. */
+  idProductoGranel: number | null;
   /** Producto GRANEL al que se suma una bolsa abierta; nulo si no tiene. */
   productoGranel: ProductoGranelLeido | null;
 };
@@ -72,6 +76,12 @@ export type ProductoCatalogo = {
   formatoVenta: FormatoVenta;
   /** Si el producto admite devolverse como bolsa abierta en un cambio de mercadería (ver `evaluarBolsaAbierta`). */
   permiteBolsaAbierta: boolean;
+  /** Id del producto GRANEL asociado; nulo si no tiene. Se devuelve aunque ese granel esté inactivo. */
+  idProductoGranel: number | null;
+  /** Nombre vigente del producto GRANEL asociado; nulo si no tiene. */
+  nombreProductoGranel: string | null;
+  /** Kilos por unidad, texto con 3 decimales; nulo si no está cargado. */
+  pesoUnitario: string | null;
 };
 
 /** Cuerpo de la respuesta 200 de `GET /api/productos`. */

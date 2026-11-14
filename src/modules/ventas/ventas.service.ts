@@ -25,6 +25,7 @@ import type {
   ConsultarVentaInput,
   ConsultarVentaResponse,
   DecisionAnulacion,
+  EstadoVentaHistorial,
   FilaHistorialVenta,
   FiltroHistorialVentas,
   ItemVentaConsultado,
@@ -317,6 +318,8 @@ export async function consultarHistorial(consulta: ConsultarHistorialInput): Pro
 
   return {
     exito: true,
+    // El reloj se toma una sola vez y recién después de leer: es lo más cercano al momento en que el front recibe la respuesta
+    fechaHoraServidor: new Date().toISOString(),
     ventas: paginaEncontrada.filas.map(convertirFilaHistorial),
     paginacion: {
       pagina: consulta.pagina,
@@ -346,7 +349,37 @@ export function calcularFiltroHistorial(consulta: ConsultarHistorialInput): Filt
       : {}),
     ...(consulta.idProducto !== undefined ? { idProducto: consulta.idProducto } : {}),
     ...(consulta.estado !== undefined ? { estado: consulta.estado } : {}),
+    ...(consulta.origen !== undefined ? { origen: consulta.origen } : {}),
+    ...(consulta.medioPago !== undefined ? { medioPago: consulta.medioPago } : {}),
+    // Un texto vacío tras el recorte equivale a no filtrar (el front lo manda así cuando el campo está limpio)
+    ...(consulta.textoCliente !== undefined && consulta.textoCliente !== ""
+      ? { textoCliente: consulta.textoCliente }
+      : {}),
+    ...(consulta.numeroComprobante !== undefined && consulta.numeroComprobante !== ""
+      ? { numeroComprobante: consulta.numeroComprobante }
+      : {}),
   };
+}
+
+// --- LÍMITE DE MODIFICACIÓN DE UNA VENTA ---
+
+/**
+ * Calcula hasta cuándo se puede editar o anular una venta: `LIMITE_MINUTOS_ANULACION` minutos desde el pago
+ * (o desde la venta si no hay pago, como en un fiado pendiente).
+ * ATENCIÓN: es la misma regla que aplica `evaluarAnulacion` (referencia `fechaHoraPago ?? fechaHora` y la misma
+ * constante). Si cambia una, hay que cambiar la otra.
+ * @returns El instante límite, o `null` si la venta está ANULADA (ya no tiene ventana).
+ */
+export function calcularLimiteModificacionVenta(venta: {
+  estado: EstadoVentaHistorial;
+  fechaHora: Date;
+  fechaHoraPago: Date | null;
+}): Date | null {
+  if (venta.estado === "ANULADA") {
+    return null;
+  }
+  const fechaReferencia = venta.fechaHoraPago ?? venta.fechaHora;
+  return new Date(fechaReferencia.getTime() + LIMITE_MINUTOS_ANULACION * MILISEGUNDOS_POR_MINUTO);
 }
 
 /**
@@ -377,17 +410,21 @@ export function calcularTotalPaginas(totalRegistros: number, cantidadPorPagina: 
   return Math.ceil(totalRegistros / cantidadPorPagina);
 }
 
-/** Convierte una fila del repositorio al formato de la respuesta (fecha ISO y monto con 2 decimales). */
+/** Convierte una fila del repositorio al formato de la respuesta (fechas ISO y monto con 2 decimales). */
 function convertirFilaHistorial(fila: FilaHistorialVenta): VentaHistorial {
+  const limiteModificacion = calcularLimiteModificacionVenta(fila);
+
   return {
     idVenta: fila.idVenta,
     numeroComprobante: fila.numeroComprobante,
     fechaHora: fila.fechaHora.toISOString(),
     estado: fila.estado,
+    fechaHoraLimiteModificacion: limiteModificacion === null ? null : limiteModificacion.toISOString(),
     montoTotal: formatearCentavos(fila.montoTotalCentavos),
     clienteReferencia: fila.clienteReferencia,
     origen: fila.origen,
     modalidadEntrega: fila.modalidadEntrega,
+    cantidadCambiosActivos: fila.cantidadCambiosActivos,
   };
 }
 
@@ -405,7 +442,8 @@ export async function consultarVenta(consulta: ConsultarVentaInput): Promise<Con
     throw crearErrorNegocio(`La venta ${consulta.idVenta} no existe`, 404);
   }
 
-  return { exito: true, venta: convertirVentaDetallada(venta) };
+  // El reloj se toma una sola vez y recién después de leer, igual que en el historial
+  return { exito: true, fechaHoraServidor: new Date().toISOString(), venta: convertirVentaDetallada(venta) };
 }
 
 /**
@@ -414,6 +452,8 @@ export async function consultarVenta(consulta: ConsultarVentaInput): Promise<Con
  * `fechaHoraPago` nulo en un fiado; pagos y `fechaHoraPago` con valor en una venta cobrada).
  */
 function convertirVentaDetallada(venta: VentaDetallada): ConsultarVentaResponse["venta"] {
+  const limiteModificacion = calcularLimiteModificacionVenta(venta);
+
   return {
     idVenta: venta.idVenta,
     numeroComprobante: venta.numeroComprobante,
@@ -421,6 +461,7 @@ function convertirVentaDetallada(venta: VentaDetallada): ConsultarVentaResponse[
     // Un fiado no cobrado no tiene fecha de pago
     fechaHoraPago: venta.fechaHoraPago === null ? null : venta.fechaHoraPago.toISOString(),
     estado: venta.estado,
+    fechaHoraLimiteModificacion: limiteModificacion === null ? null : limiteModificacion.toISOString(),
     origen: venta.origen,
     modalidadEntrega: venta.modalidadEntrega,
     clienteReferencia: venta.clienteReferencia,
@@ -443,7 +484,7 @@ function convertirVentaDetallada(venta: VentaDetallada): ConsultarVentaResponse[
   };
 }
 
-/** Convierte un ítem al formato de la respuesta: precio con 2 decimales y cantidad con 3. */
+/** Convierte un ítem al formato de la respuesta: precio con 2 decimales y cantidades con 3. */
 function convertirItemVenta(item: ItemVentaDetallado): ItemVentaConsultado {
   return {
     idProducto: item.idProducto,
@@ -452,6 +493,8 @@ function convertirItemVenta(item: ItemVentaDetallado): ItemVentaConsultado {
     cantidad: formatearMilesimas(item.cantidadMilesimas),
     precioUnitario: formatearCentavos(item.precioUnitarioCentavos),
     subtotal: formatearCentavos(item.subtotalCentavos),
+    // El decimal exacto de la base se formatea sin pasar por Number; sin cambios activos de ese producto no hay suma
+    cantidadYaDevuelta: item.cantidadYaDevuelta === null ? formatearMilesimas(0) : item.cantidadYaDevuelta.toFixed(3),
   };
 }
 
@@ -670,7 +713,9 @@ export function evaluarAnulacion(
     throw crearErrorVentaYaAnulada(venta.idVenta);
   }
 
-  // La ventana corre desde el pago si lo hay (un fiado cobrado vuelve a tener 15 min) y si no, desde la venta
+  // La ventana corre desde el pago si lo hay (un fiado cobrado vuelve a tener 15 min) y si no, desde la venta.
+  // ATENCIÓN: es la misma regla que expone `calcularLimiteModificacionVenta` al front (`fechaHoraLimiteModificacion`).
+  // Si cambia una, hay que cambiar la otra.
   const limiteVentana = calcularLimiteVentana(ahora);
   const fechaReferencia = venta.fechaHoraPago ?? venta.fechaHora;
   if (fechaReferencia < limiteVentana) {

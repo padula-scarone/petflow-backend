@@ -22,7 +22,7 @@ export async function buscarProductosActivos(busqueda: string | undefined): Prom
       ...(busqueda !== undefined && { nombre: { contains: busqueda, mode: "insensitive" } }),
     },
     // Select explícito: payload liviano y sin exponer costo, categoría ni código de barras.
-    // El peso y el granel asociado no salen en la respuesta: solo deciden `permiteBolsaAbierta`
+    // El peso y el granel asociado (id y nombre vigente) salen en la respuesta y además deciden `permiteBolsaAbierta`
     select: {
       idProducto: true,
       nombre: true,
@@ -30,7 +30,8 @@ export async function buscarProductosActivos(busqueda: string | undefined): Prom
       stockFisico: true,
       formatoVenta: true,
       pesoUnitario: true,
-      productoGranel: { select: { formatoVenta: true, estado: true } },
+      idProductoGranel: true,
+      productoGranel: { select: { nombre: true, formatoVenta: true, estado: true } },
     },
     // El id desempata para que el orden sea estable entre consultas
     orderBy: [{ nombre: "asc" }, { idProducto: "asc" }],
