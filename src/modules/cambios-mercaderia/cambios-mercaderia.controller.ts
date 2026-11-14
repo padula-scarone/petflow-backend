@@ -70,13 +70,14 @@ function responderErrorNegocio(res: Response, errorCapturado: unknown): boolean 
  * Respuestas: 201 si se registra; 400 con detalle por campo si el body es inválido o con mensaje si falla una regla de negocio;
  * 404 si un producto, la venta o el medio de pago no existen; 409 si la venta está anulada o pendiente de pago,
  * se excede lo devolvible, no hay caja abierta o no alcanza el stock del entregado.
+ * Todo error de negocio o de validación trae además `codigo`, legible por máquina (ver `CodigoErrorCambio`).
  */
 export async function postRegistrarCambio(req: Request, res: Response): Promise<void> {
   // En Express 5 un POST sin body deja `req.body` en undefined: se trata como objeto vacío para que los errores
   // salgan con el nombre de cada campo faltante
   const parseo = registrarCambioSchema.safeParse(req.body ?? {});
   if (!parseo.success) {
-    res.status(400).json(construirRespuestaValidacion("Datos de cambio inválidos", parseo.error.issues));
+    res.status(400).json(construirRespuestaValidacionConCodigo("Datos de cambio inválidos", parseo.error.issues));
     return;
   }
 
@@ -89,8 +90,7 @@ export async function postRegistrarCambio(req: Request, res: Response): Promise<
   } catch (errorCapturado) {
     // Los errores de negocio (objetos puros) se traducen a su código HTTP;
     // cualquier otro valor (BD caída, bug) no pasa la guarda y sube a Express
-    if (esErrorNegocio(errorCapturado)) {
-      res.status(errorCapturado.status).json({ exito: false, mensaje: errorCapturado.mensaje });
+    if (responderErrorNegocio(res, errorCapturado)) {
       return;
     }
     throw errorCapturado;

@@ -1,8 +1,7 @@
 import type { Prisma } from "../../generated/prisma/client.js";
 import { aDecimal, Decimal } from "../../shared/decimal.js";
 import { prisma } from "../../shared/prisma.js";
-import { crearErrorStockInsuficiente } from "../ventas/ventas.errors.js";
-import { crearErrorSinCajaParaCambio } from "./cambios-mercaderia.errors.js";
+import { crearErrorSinCajaParaCambio, crearErrorStockInsuficienteCambio } from "./cambios-mercaderia.errors.js";
 import type {
   CambioCalculado,
   CambioDetalleLeido,
@@ -13,6 +12,7 @@ import type {
   PaginaHistorialCambios,
   ProductoParaCambio,
   RegistrarCambioInput,
+  ResultadoAltaCambio,
   VentaOriginalLeida,
 } from "./cambios-mercaderia.types.js";
 
@@ -52,8 +52,10 @@ export function construirCondicionCambiosActivos(
 
 /**
  * Guarda un cambio de mercadería completo en una única transacción: ingresa el stock devuelto,
- * descuenta el entregado y crea el registro. Es la única capa del módulo que toca Prisma.
+ * descuenta el entregado, crea el registro y lo relee con el mismo detalle que consulta `GET /:idCambio`.
+ * Es la única capa del módulo que toca Prisma.
  * Si algo falla (recurso, regla, caja, stock, BD) se revierte todo: no quedan stocks movidos sin cambio registrado.
+ * La relectura va antes de confirmar: lo que se responde es exactamente lo que quedó guardado.
  * Usa el nivel de aislamiento predeterminado (READ COMMITTED), como el resto de las transacciones del sistema.
  * No toca `saldoActual` de la caja: el ingreso queda como `idCaja` + `saldoResultante`, igual que en las ventas.
  *
@@ -62,14 +64,14 @@ export function construirCondicionCambiosActivos(
  * en conjunto, más de lo vendido. El stock del entregado sí tiene guarda atómica.
  * @param input Cuerpo validado del cambio más el usuario tomado del token.
  * @param calcular Cálculo de negocio, ejecutado dentro de la transacción con datos recién leídos.
- * @returns Los datos del cambio persistido.
- * @throws {ErrorNegocio} Las del cálculo (404/400/409), no hay caja abierta (409) o el stock del entregado
+ * @returns Los datos del cambio persistido y el cambio releído (detalle completo).
+ * @throws {ErrorNegocioCambio} Las del cálculo (404/400/409), no hay caja abierta (409) o el stock del entregado
  * no alcanza (409). Se lanza como objeto puro, no como Error.
  */
 export async function registrarCambioAtomico(
   input: RegistrarCambioInput,
   calcular: CalcularCambio,
-): Promise<CambioPersistido> {
+): Promise<ResultadoAltaCambio> {
   return prisma.$transaction(async (transaccion) => {
     // --- LECTURA ---
     const idsProductos = [...new Set([input.idProductoDevuelto, input.idProductoEntregado])];
@@ -171,7 +173,7 @@ export async function registrarCambioAtomico(
           data: { stockFisico: { decrement: cantidad } },
         });
         if (actualizados.count !== 1) {
-          throw crearErrorStockInsuficiente(operacion.idProducto);
+          throw crearErrorStockInsuficienteCambio(operacion.idProducto);
         }
       } else {
         // Incremento atómico en la BD con el decimal exacto: sin pasar por coma flotante ni leer el stock antes
@@ -201,18 +203,33 @@ export async function registrarCambioAtomico(
         costoUnitarioCongeladoEntregado: calculo.costoUnitarioEntregado.toFixed(2),
         saldoResultante: calculo.saldo.toFixed(2),
         idMedioPago: calculo.idMedioPago,
+        motivoCambio: input.motivoCambio,
+        // Nulos si no hubo saldo, si el medio no es efectivo o si no se informó el recibido
+        montoRecibido: calculo.montoRecibido === null ? null : calculo.montoRecibido.toFixed(2),
+        vuelto: calculo.vuelto === null ? null : calculo.vuelto.toFixed(2),
       },
       select: { idCambio: true, fechaHora: true },
     });
 
+    // --- RELECTURA ---
+    // Dentro de la misma transacción: ve lo que se acaba de escribir y nada puede cambiarlo antes de responder
+    const detalle = await leerDetalleCambio(transaccion, cambioCreado.idCambio);
+    if (detalle === null) {
+      // Inalcanzable: el cambio se creó en esta misma transacción. El error revierte todo y sube a Express como 500
+      throw new Error(`No se pudo releer el cambio ${cambioCreado.idCambio} recién creado`);
+    }
+
     return {
-      ...calculo,
-      idCambio: cambioCreado.idCambio,
-      fechaHora: cambioCreado.fechaHora,
-      idVentaOriginal: ventaOriginal === null ? null : ventaOriginal.idVenta,
-      idProductoDevuelto: input.idProductoDevuelto,
-      esBolsaAbierta: input.esBolsaAbierta,
-      idProductoEntregado: input.idProductoEntregado,
+      persistido: {
+        ...calculo,
+        idCambio: cambioCreado.idCambio,
+        fechaHora: cambioCreado.fechaHora,
+        idVentaOriginal: ventaOriginal === null ? null : ventaOriginal.idVenta,
+        idProductoDevuelto: input.idProductoDevuelto,
+        esBolsaAbierta: input.esBolsaAbierta,
+        idProductoEntregado: input.idProductoEntregado,
+      },
+      detalle,
     };
   });
 }
@@ -255,14 +272,14 @@ async function leerVentaOriginal(transaccion: ClienteTransaccion, idVenta: numbe
 
 /**
  * Lee un medio de pago.
- * @returns El medio con su estado, o `null` si no existe (el cálculo decide el 404).
+ * @returns El medio con su estado y su tipo (decide si admite monto recibido), o `null` si no existe (el cálculo decide el 404).
  */
 async function leerMedioPago(transaccion: ClienteTransaccion, idMedioPago: number): Promise<MedioPagoParaCambio | null> {
   const medio = await transaccion.medioPago.findUnique({
     where: { idMedioPago },
-    select: { idMedioPago: true, estado: true },
+    select: { idMedioPago: true, estado: true, tipo: true },
   });
-  return medio === null ? null : { idMedioPago: medio.idMedioPago, activo: medio.estado === "ACTIVO" };
+  return medio === null ? null : { idMedioPago: medio.idMedioPago, activo: medio.estado === "ACTIVO", tipo: medio.tipo };
 }
 
 // --- CONSULTA DE HISTORIAL ---
