@@ -12,6 +12,15 @@ import {
   MOTIVO_CAMBIO_LONGITUD_MAXIMA,
   registrarCambioSchema,
 } from "../modules/cambios-mercaderia/cambios-mercaderia.schemas.js";
+import { CODIGOS_ERROR_DEUDOR } from "../modules/deudores/deudores.errors.js";
+import {
+  actualizarDeudorParametrosSchema,
+  BUSQUEDA_LONGITUD_MAXIMA as BUSQUEDA_DEUDORES_LONGITUD_MAXIMA,
+  consultarDeudoresSchema,
+  datosDeudorSchema,
+  ID_DEUDOR_MAXIMO,
+  NOMBRE_COMPLETO_LONGITUD_MAXIMA,
+} from "../modules/deudores/deudores.schemas.js";
 import { consultarProductosSchema, BUSQUEDA_LONGITUD_MAXIMA } from "../modules/inventario/inventario.schemas.js";
 import {
   CANTIDAD_POR_PAGINA_MAXIMA,
@@ -1268,6 +1277,195 @@ const mediosPagoListados = {
   required: ["exito", "mediosPago"],
 };
 
+// --- DEUDORES ---
+// Todos los ejemplos usan datos claramente falsos (DNI 99000001, teléfono 5491100000001).
+
+/** Deudor tal como lo devuelve la API (ver `Deudor`): las cuatro columnas, sin ningún otro dato. */
+const deudor = {
+  type: "object",
+  properties: {
+    idDeudor: { type: "integer", example: 1 },
+    nombreCompleto: { type: "string", example: "Prueba Uno" },
+    telefono: {
+      type: "string",
+      example: "5491100000001",
+      description: "Solo dígitos (de 11 a 15), con código de país: se guarda normalizado, sin espacios, guiones ni `+`",
+    },
+    dni: { type: "string", example: "99000001", description: "De 7 u 8 dígitos, sin puntos. Es único: no hay dos deudores con el mismo DNI" },
+  },
+  required: ["idDeudor", "nombreCompleto", "telefono", "dni"],
+};
+
+// El body se deriva del esquema Zod real (io "input" = lo que envía el cliente); el formato de cada campo
+// se agrega aparte porque Zod no lo guarda como descripción y el patrón derivado no cubre la cantidad de dígitos
+const esquemaDatosDeudor = z.toJSONSchema(datosDeudorSchema, { io: "input", target: "draft-7" });
+const propiedadesDatosDeudor = esquemaDatosDeudor.properties ?? {};
+
+/** Esquema derivado de un campo del body (en JSON Schema una propiedad también puede ser un booleano: aquí nunca lo es). */
+function esquemaCampoDeudor(nombre: string): object {
+  const esquemaCampo = propiedadesDatosDeudor[nombre];
+  return typeof esquemaCampo === "object" ? esquemaCampo : {};
+}
+
+const cuerpoDatosDeudor = {
+  ...esquemaDatosDeudor,
+  properties: {
+    nombreCompleto: {
+      ...esquemaCampoDeudor("nombreCompleto"),
+      description: `Nombre y apellido. Se recortan los espacios de los extremos; de 1 a ${NOMBRE_COMPLETO_LONGITUD_MAXIMA} caracteres`,
+      example: "Prueba Uno",
+    },
+    telefono: {
+      ...esquemaCampoDeudor("telefono"),
+      description:
+        "Teléfono de 11 a 15 dígitos, con código de país (no se exige que empiece con 54). " +
+        "En la entrada se aceptan espacios, guiones y un `+` solo al inicio; se guarda y se devuelve solo con dígitos",
+      example: "5491100000001",
+    },
+    dni: {
+      ...esquemaCampoDeudor("dni"),
+      description: "DNI de 7 u 8 dígitos, sin puntos. Se recortan los espacios de los extremos; se guarda como texto",
+      example: "99000001",
+    },
+  },
+  example: { nombreCompleto: "Prueba Uno", telefono: "5491100000001", dni: "99000001" },
+};
+
+/** Error de negocio (404/409) de deudores: el de siempre más `codigo` y, en el 409, el deudor que ya tiene ese DNI. */
+const errorNegocioDeudor = {
+  type: "object",
+  properties: {
+    ...errorNegocio.properties,
+    mensaje: { type: "string", example: "Ya existe un deudor con ese DNI" },
+    codigo: {
+      type: "string",
+      enum: [...CODIGOS_ERROR_DEUDOR],
+      example: "DNI_DUPLICADO",
+      description: "Caso del rechazo, para que el front no lea el texto del mensaje. Los errores 400 y 401 no lo traen",
+    },
+    deudorExistente: {
+      ...deudor,
+      description: "Solo en `DNI_DUPLICADO`: el deudor que ya tiene ese DNI, para que el front lo seleccione",
+    },
+  },
+  required: ["exito", "mensaje", "codigo"],
+};
+
+/** Respuesta 409 de deudores: el DNI ya pertenece a otro deudor. El mensaje es fijo y no repite el DNI. */
+const dniDuplicado = {
+  ...errorNegocioDeudor,
+  properties: {
+    ...errorNegocioDeudor.properties,
+    codigo: { type: "string", enum: ["DNI_DUPLICADO"], example: "DNI_DUPLICADO" },
+  },
+  required: ["exito", "mensaje", "codigo", "deudorExistente"],
+};
+
+/** Respuesta 404 de `PUT /api/deudores/{idDeudor}`: el deudor no existe. */
+const deudorInexistente = {
+  type: "object",
+  properties: {
+    exito: { type: "boolean", example: false },
+    mensaje: { type: "string", example: "El deudor 999 no existe" },
+    codigo: { type: "string", enum: ["DEUDOR_NO_ENCONTRADO"], example: "DEUDOR_NO_ENCONTRADO" },
+  },
+  required: ["exito", "mensaje", "codigo"],
+};
+
+/**
+ * Error de validación (400) del body de deudores (alta y edición) o de su id de ruta: mismo formato que el resto,
+ * sin `codigo`. Los mensajes son fijos y nunca repiten el valor recibido (RNF-VENTAS-03).
+ */
+const errorValidacionDeudor = {
+  ...errorValidacion,
+  properties: {
+    ...errorValidacion.properties,
+    mensaje: { type: "string", example: "Datos de deudor inválidos", description: "En el id de ruta de la edición es \"Parámetros de ruta inválidos\"" },
+    errores: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          campo: { type: "string", example: "dni" },
+          mensaje: { type: "string", example: "El DNI debe tener 7 u 8 dígitos, sin puntos" },
+        },
+      },
+    },
+  },
+};
+
+/** Respuesta exitosa de `POST /api/deudores` (ver `RegistrarDeudorResponse`). */
+const deudorRegistrado = {
+  type: "object",
+  properties: {
+    exito: { type: "boolean", example: true },
+    mensaje: { type: "string", example: "Deudor registrado" },
+    deudor,
+  },
+  required: ["exito", "mensaje", "deudor"],
+};
+
+/** Respuesta exitosa de `PUT /api/deudores/{idDeudor}` (ver `ActualizarDeudorResponse`). */
+const deudorActualizado = {
+  type: "object",
+  properties: {
+    exito: { type: "boolean", example: true },
+    mensaje: { type: "string", example: "Deudor actualizado" },
+    deudor,
+  },
+  required: ["exito", "mensaje", "deudor"],
+};
+
+/** Respuesta exitosa de `GET /api/deudores` (ver `ConsultarDeudoresResponse`). */
+const deudoresConsultados = {
+  type: "object",
+  properties: {
+    exito: { type: "boolean", example: true },
+    deudores: { type: "array", items: deudor },
+    paginacion: {
+      type: "object",
+      properties: {
+        pagina: { type: "integer", example: 1 },
+        cantidadPorPagina: { type: "integer", example: 20 },
+        totalRegistros: { type: "integer", example: 1 },
+        totalPaginas: { type: "integer", example: 1 },
+      },
+      required: ["pagina", "cantidadPorPagina", "totalRegistros", "totalPaginas"],
+    },
+  },
+  required: ["exito", "deudores", "paginacion"],
+};
+
+/** Descripción de cada parámetro de la búsqueda de deudores (los rangos salen de las mismas constantes del esquema). */
+const descripcionesParametrosDeudores: Record<string, string> = {
+  pagina: `Número de página, entero entre 1 y ${PAGINA_MAXIMA}. Por defecto 1.`,
+  cantidadPorPagina: `Filas por página, entero entre 1 y ${CANTIDAD_POR_PAGINA_MAXIMA}. Por defecto ${CANTIDAD_POR_PAGINA_PREDETERMINADA}.`,
+  busqueda:
+    `Texto contenido en el nombre completo o en el DNI (máximo ${BUSQUEDA_DEUDORES_LONGITUD_MAXIMA} caracteres), sin distinguir mayúsculas. ` +
+    "Se recortan los espacios de los extremos. Coincidencia parcial, no exacta. Vacío o ausente equivale a no filtrar. " +
+    "Los caracteres `%` y `_` actúan como comodines.",
+};
+
+// Los parámetros se derivan del esquema Zod real, igual que los del historial, para que no se desactualicen
+const esquemaConsultaDeudores = z.toJSONSchema(consultarDeudoresSchema, { io: "input", target: "draft-7" });
+const parametrosDeudores = Object.entries(esquemaConsultaDeudores.properties ?? {}).map(([nombre, esquema]) => ({
+  name: nombre,
+  in: "query",
+  required: false,
+  description: descripcionesParametrosDeudores[nombre],
+  schema: esquema,
+}));
+
+// El parámetro de ruta también se deriva del esquema Zod real
+const esquemaActualizacionDeudorParametros = z.toJSONSchema(actualizarDeudorParametrosSchema, { io: "input", target: "draft-7" });
+const parametroIdDeudor = {
+  name: "idDeudor",
+  in: "path",
+  required: true,
+  description: `Id del deudor: entero positivo (máximo ${ID_DEUDOR_MAXIMO}), por ejemplo el que devuelve la búsqueda de deudores.`,
+  schema: (esquemaActualizacionDeudorParametros.properties ?? {}).idDeudor,
+};
+
 // --- DOCUMENTO OPENAPI ---
 
 /**
@@ -1817,6 +2015,105 @@ export const openapiDocument = {
               "o no alcanza el stock para revertirlo (`STOCK_INSUFICIENTE_PARA_REVERTIR`)",
             content: { "application/json": { schema: errorNegocioCambio } },
           },
+        },
+      },
+    },
+    "/api/deudores": {
+      get: {
+        tags: ["Ventas"],
+        security: [{ bearerAuth: [] }],
+        summary: "Buscar deudores (paginado)",
+        description:
+          "Alimenta el buscador de deudores. `busqueda` coincide de forma parcial, sin distinguir mayúsculas, con el nombre completo o con el DNI; " +
+          "vacía o ausente devuelve todos. Orden fijo: nombre completo ascendente con desempate por id ascendente " +
+          "(el orden alfabético depende de la intercalación de la base). Una página fuera de rango devuelve 200 con lista vacía. " +
+          "La lista y el total salen de la misma foto de la base. Solo lectura. " +
+          "Requiere sesión; pueden usarlo los tres roles (VENDEDOR, GESTOR_COMERCIAL y GERENTE) y no exige caja abierta.",
+        parameters: parametrosDeudores,
+        responses: {
+          "200": {
+            description: "Página de deudores con sus metadatos de paginación",
+            content: { "application/json": { schema: deudoresConsultados } },
+          },
+          "400": {
+            description: "Parámetros de consulta inválidos (formato, rango o `busqueda` de más de 100 caracteres)",
+            content: { "application/json": { schema: errorValidacionConsulta } },
+          },
+          ...respuestasProteccion,
+        },
+      },
+      post: {
+        tags: ["Ventas"],
+        security: [{ bearerAuth: [] }],
+        summary: "Registrar un deudor",
+        description:
+          "Da de alta un deudor con nombre completo, teléfono y DNI. El DNI es único: si ya existe, responde 409 `DNI_DUPLICADO` " +
+          "con `deudorExistente` (el deudor que ya lo tiene), también cuando dos altas con el mismo DNI llegan a la vez. " +
+          "**Formatos:** DNI de 7 u 8 dígitos sin puntos (se recortan los espacios de los extremos y se guarda como texto); " +
+          "teléfono de 11 a 15 dígitos con código de país, donde la entrada admite espacios, guiones y un `+` solo al inicio y se guarda solo con dígitos. " +
+          "Los mensajes de error son fijos y nunca repiten el DNI ni el teléfono. Una clave desconocida en el body (por ejemplo `idDeudor`) se ignora sin error. " +
+          "Requiere sesión; pueden usarlo los tres roles (VENDEDOR, GESTOR_COMERCIAL y GERENTE) y no exige caja abierta.",
+        requestBody: {
+          required: true,
+          content: {
+            // El esquema se deriva de Zod con `io: "input"`: describe lo que envía el cliente, no el resultado ya transformado
+            "application/json": { schema: cuerpoDatosDeudor },
+          },
+        },
+        responses: {
+          "201": {
+            description: "Deudor registrado",
+            content: { "application/json": { schema: deudorRegistrado } },
+          },
+          "400": {
+            description: "Body inválido: nombre vacío o de más de 100 caracteres, DNI que no tiene 7 u 8 dígitos, o teléfono con caracteres no admitidos o que no tiene de 11 a 15 dígitos",
+            content: { "application/json": { schema: errorValidacionDeudor } },
+          },
+          "409": {
+            description: "Ya existe un deudor con ese DNI (`DNI_DUPLICADO`); `deudorExistente` trae sus datos",
+            content: { "application/json": { schema: dniDuplicado } },
+          },
+          ...respuestasProteccion,
+        },
+      },
+    },
+    "/api/deudores/{idDeudor}": {
+      put: {
+        tags: ["Ventas"],
+        security: [{ bearerAuth: [] }],
+        summary: "Editar un deudor",
+        description:
+          "Reemplaza los tres datos del deudor (nombre completo, teléfono y DNI), con los mismos formatos y reglas que el alta. " +
+          "Conservar su propio DNI no es un conflicto: una edición idéntica también responde 200. El DNI de otro deudor responde 409 `DNI_DUPLICADO` " +
+          "con `deudorExistente`. El id sale siempre de la ruta: un `idDeudor` en el body se ignora. No existe baja: no hay DELETE ni estado. " +
+          "Orden de evaluación: 400 (id y body), 404 (el deudor no existe), 409 (DNI de otro deudor). " +
+          "Requiere sesión; pueden usarlo los tres roles (VENDEDOR, GESTOR_COMERCIAL y GERENTE) y no exige caja abierta.",
+        parameters: [parametroIdDeudor],
+        requestBody: {
+          required: true,
+          content: {
+            // El esquema se deriva de Zod con `io: "input"`: describe lo que envía el cliente, no el resultado ya transformado
+            "application/json": { schema: cuerpoDatosDeudor },
+          },
+        },
+        responses: {
+          "200": {
+            description: "Deudor actualizado",
+            content: { "application/json": { schema: deudorActualizado } },
+          },
+          "400": {
+            description: "`idDeudor` inválido (no es un entero positivo) o body inválido (mismas reglas que el alta)",
+            content: { "application/json": { schema: errorValidacionDeudor } },
+          },
+          "404": {
+            description: "El deudor no existe (`DEUDOR_NO_ENCONTRADO`)",
+            content: { "application/json": { schema: deudorInexistente } },
+          },
+          "409": {
+            description: "El DNI ya pertenece a otro deudor (`DNI_DUPLICADO`); `deudorExistente` trae sus datos",
+            content: { "application/json": { schema: dniDuplicado } },
+          },
+          ...respuestasProteccion,
         },
       },
     },
