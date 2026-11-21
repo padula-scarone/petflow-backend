@@ -315,3 +315,17 @@ model CambioMercaderia {
   @@index([idVentaOriginal])
   @@map("cambios_mercaderia")
 }
+
+// 5. DEUDORES
+// Persona que tiene o tuvo un fiado. Se identifica por su DNI (unico). No hay baja: no tiene estado.
+// La tabla se crea a mano en Supabase; Prisma solo la mapea.
+model Deudor {
+  idDeudor       Int    @id @default(autoincrement()) @map("id_deudor")
+  nombreCompleto String @map("nombre_completo") @db.VarChar(100)
+  // Solo digitos, de 11 a 15, con codigo de pais
+  telefono       String @db.VarChar(15)
+  // Solo digitos, 7 u 8, sin puntos; texto para conservar ceros a la izquierda
+  dni            String @unique @db.VarChar(8)
+
+  @@map("deudores")
+}
