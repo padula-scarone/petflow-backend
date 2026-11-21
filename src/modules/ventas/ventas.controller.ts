@@ -1,5 +1,7 @@
 import type { Request, Response } from "express";
 import type { SesionAutenticada } from "../auth/auth.types.js";
+// Deuda técnica: importación entre módulos (deudores ya importa de ventas); la guarda debería vivir en `shared`
+import { esErrorNegocioDeudor } from "../deudores/deudores.errors.js";
 import { esErrorNegocio } from "./ventas.errors.js";
 import {
   anularVentaCuerpoSchema,
@@ -37,14 +39,36 @@ function construirRespuestaValidacion(mensaje: string, incidencias: ReadonlyArra
   };
 }
 
+/**
+ * Responde un error de negocio del alta de venta con su código HTTP y su mensaje.
+ * Solo el error de un deudor inexistente suma `codigo` (`DEUDOR_NO_ENCONTRADO`); todos los demás mantienen
+ * el formato de siempre `{ exito: false, mensaje }`, sin `codigo`.
+ * @returns `true` si el valor era un error de negocio y ya se respondió; `false` si hay que relanzarlo.
+ */
+function responderErrorNegocio(res: Response, errorCapturado: unknown): boolean {
+  if (esErrorNegocioDeudor(errorCapturado)) {
+    res.status(errorCapturado.status).json({
+      exito: false,
+      mensaje: errorCapturado.mensaje,
+      codigo: errorCapturado.codigo,
+    });
+    return true;
+  }
+  if (esErrorNegocio(errorCapturado)) {
+    res.status(errorCapturado.status).json({ exito: false, mensaje: errorCapturado.mensaje });
+    return true;
+  }
+  return false;
+}
+
 // --- HANDLERS ---
 
 /**
  * Handler de `POST /api/ventas`.
  * Valida el body y delega en el service. No contiene reglas de negocio.
  * El vendedor es el usuario del token (`res.locals.sesion`, que deja `requerirRol`); un `idUsuario` en el body se ignora.
- * Respuestas: 201 si se registra; 400 con detalle por campo si el body es inválido;
- * el código del error de negocio (400/404/409) si falla una regla de negocio.
+ * Respuestas: 201 si se registra (con el `deudor` si es un fiado); 400 con detalle por campo si el body es inválido;
+ * el código del error de negocio (400/404/409) si falla una regla de negocio; el 404 de un deudor inexistente suma `codigo`.
  */
 export async function postRegistrarVenta(req: Request, res: Response): Promise<void> {
   // safeParse no lanza: permite responder el detalle de cada campo inválido
@@ -63,8 +87,7 @@ export async function postRegistrarVenta(req: Request, res: Response): Promise<v
   } catch (errorCapturado) {
     // Los errores de negocio (objetos puros) se traducen a su código HTTP;
     // cualquier otro valor (BD caída, bug) no pasa la guarda y sube a Express
-    if (esErrorNegocio(errorCapturado)) {
-      res.status(errorCapturado.status).json({ exito: false, mensaje: errorCapturado.mensaje });
+    if (responderErrorNegocio(res, errorCapturado)) {
       return;
     }
     throw errorCapturado;

@@ -85,14 +85,16 @@ const pagoConMontoRecibidoSchema = pagoVentaSchema.extend({
 
 /**
  * Contrato de entrada de `POST /api/ventas`.
- * Si `pagos` viene vacío la venta es un fiado y `clienteReferencia` pasa a ser obligatorio.
+ * Si `pagos` viene vacío la venta es un fiado y `idDeudor` pasa a ser obligatorio; en una venta de contado `idDeudor` no se admite.
+ * Que el deudor exista lo verifica el service (el esquema no conoce la base).
  * El vendedor no viaja en el body: sale del token. Si llega `idUsuario`, Zod lo descarta sin error (el objeto no es estricto).
+ * Lo mismo pasa con `clienteReferencia`, que ya no forma parte del contrato: se descarta y no se guarda.
  */
 export const registrarVentaSchema = z
   .object({
     origen: z.enum(["MOSTRADOR", "DIGITAL"]),
     modalidadEntrega: z.enum(["RETIRO", "ENVIO"]),
-    clienteReferencia: z.string().trim().min(1).max(100).optional(),
+    idDeudor: z.number().int().positive().max(ID_ENTERO_MAXIMO).optional(),
     items: z.array(itemVentaSchema).min(1),
     pagos: z.array(pagoConMontoRecibidoSchema),
     descuentoManual: z
@@ -110,12 +112,22 @@ export const registrarVentaSchema = z
   })
   // Reglas que cruzan varios campos y no se pueden expresar en cada campo por separado
   .superRefine((data, ctx) => {
-    // Un fiado necesita saber quién es el deudor
-    if (data.pagos.length === 0 && !data.clienteReferencia) {
+    // Fiado = sin pagos. Un fiado necesita deudor; una venta de contado con deudor se rechaza porque una venta
+    // COMPLETADA con deudor solo podría ser un fiado ya cobrado y quedaría indistinguible de uno.
+    // Los mensajes son fijos: nunca incluyen datos del deudor (RNF-VENTAS-03)
+    const esFiado = data.pagos.length === 0;
+    if (esFiado && data.idDeudor === undefined) {
       ctx.addIssue({
         code: "custom",
-        path: ["clienteReferencia"],
-        message: "Una venta al fiado requiere el nombre o referencia del cliente",
+        path: ["idDeudor"],
+        message: "Una venta al fiado requiere un deudor",
+      });
+    }
+    if (!esFiado && data.idDeudor !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["idDeudor"],
+        message: "Una venta de contado no admite deudor",
       });
     }
 
@@ -197,7 +209,7 @@ export const VALOR_MEDIO_PAGO_MIXTO = "MIXTO";
 /** Tope de `medioPago` cuando es un id: máximo de una columna integer de PostgreSQL (más allá, la BD falla con 500). */
 export const ID_MEDIO_PAGO_MAXIMO = 2_147_483_647;
 
-/** Largo máximo de `textoCliente`: coincide con la columna `cliente_referencia` (VARCHAR(100)). */
+/** Largo máximo de `textoCliente`: coincide con la columna `deudores.nombre_completo` (VARCHAR(100)), por la que se busca. */
 export const TEXTO_CLIENTE_LONGITUD_MAXIMA = 100;
 
 /** Largo máximo de `numeroComprobante`: coincide con la columna `numero_comprobante` (VARCHAR(30)). */
@@ -271,7 +283,7 @@ export const medioPagoHistorialSchema = z
  * Contrato de entrada de `GET /api/ventas` (query params, todos opcionales).
  * Los valores llegan como texto; la conversión a número es estricta (ver `enteroDesdeTexto`).
  * Las fechas son inclusivas en ambos extremos y se interpretan en hora de Argentina.
- * `textoCliente` y `numeroComprobante` buscan dentro del texto (sin distinguir mayúsculas) y, si quedan vacíos
+ * `textoCliente` (nombre del deudor) y `numeroComprobante` buscan dentro del texto (sin distinguir mayúsculas) y, si quedan vacíos
  * tras el recorte, equivalen a no filtrar (lo resuelve el service, igual que `busqueda` en productos).
  */
 export const consultarHistorialSchema = z

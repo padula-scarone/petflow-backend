@@ -1,4 +1,5 @@
 import type { z } from "zod";
+import type { Deudor } from "../deudores/deudores.types.js";
 import type { DecimalExacto } from "../inventario/inventario.types.js";
 import type {
   anularVentaCuerpoSchema,
@@ -30,6 +31,15 @@ export type ModalidadEntrega = RegistrarVentaCuerpo["modalidadEntrega"];
 
 /** Estados con los que puede nacer una venta: cobrada o fiado. */
 export type EstadoVenta = "COMPLETADA" | "PENDIENTE_PAGO";
+
+// --- DEUDOR DE LA VENTA ---
+// El deudor completo (`Deudor`) se toma del módulo deudores. Deuda técnica: importación entre módulos.
+
+/**
+ * Deudor reducido a lo que muestra la grilla del historial: sin DNI ni teléfono (RNF-VENTAS-03),
+ * que solo viajan en el detalle de una venta.
+ */
+export type DeudorResumido = Pick<Deudor, "idDeudor" | "nombreCompleto">;
 
 // --- DATOS LEÍDOS DE LA BASE ---
 // Montos en centavos (enteros), cantidades en milésimas (enteros) y porcentajes en
@@ -113,6 +123,8 @@ export type RegistrarVentaResponse = {
     fechaHora: string;
     /** Vacío en un fiado. Permite al front mostrar el vuelto sin otra consulta. */
     pagos: PagoCobrado[];
+    /** Deudor del fiado, con sus cuatro datos. Nulo en una venta de contado. */
+    deudor: Deudor | null;
   };
 };
 
@@ -141,7 +153,7 @@ export type FiltroHistorialVentas = {
    * Un fiado pendiente no tiene pagos y no coincide con ninguno.
    */
   medioPago?: number | "MIXTO";
-  /** Texto contenido en `clienteReferencia`, ya recortado y no vacío. Una venta sin cliente no coincide. */
+  /** Texto contenido en el nombre del deudor (`deudor.nombreCompleto`), ya recortado y no vacío. Una venta sin deudor no coincide. */
   textoCliente?: string;
   /** Texto contenido en `numeroComprobante`, ya recortado y no vacío. */
   numeroComprobante?: string;
@@ -162,7 +174,10 @@ export type FilaHistorialVenta = {
   fechaHoraPago: Date | null;
   estado: EstadoVentaHistorial;
   montoTotalCentavos: number;
+  /** @deprecated Texto libre de las ventas anteriores al vínculo con deudores; las ventas nuevas lo dejan nulo. */
   clienteReferencia: string | null;
+  /** Deudor de la venta, o `null` si es de contado o anterior al vínculo con deudores. Sale en el mismo select de la venta. */
+  deudor: DeudorResumido | null;
   origen: OrigenVenta;
   modalidadEntrega: ModalidadEntrega;
   /** Cambios de mercadería ACTIVOS vinculados a esta venta; 0 si no hay. */
@@ -192,8 +207,13 @@ export type VentaHistorial = {
   fechaHoraLimiteModificacion: string | null;
   /** Monto total como texto con 2 decimales, igual que en el alta. */
   montoTotal: string;
-  /** Nulo si la venta no tiene cliente asociado. */
+  /**
+   * @deprecated Solo lectura: texto libre de las ventas anteriores al vínculo con deudores; nulo en las demás.
+   * Usar `deudor`.
+   */
   clienteReferencia: string | null;
+  /** Deudor de la venta (id y nombre), o `null` si es de contado o anterior al vínculo con deudores. */
+  deudor: DeudorResumido | null;
   origen: OrigenVenta;
   modalidadEntrega: ModalidadEntrega;
   /** Cambios de mercadería ACTIVOS vinculados a esta venta; 0 si no hay. */
@@ -276,7 +296,10 @@ export type VentaDetallada = {
   estado: EstadoVentaHistorial;
   origen: OrigenVenta;
   modalidadEntrega: ModalidadEntrega;
+  /** @deprecated Texto libre de las ventas anteriores al vínculo con deudores; las ventas nuevas lo dejan nulo. */
   clienteReferencia: string | null;
+  /** Deudor de la venta con sus cuatro datos, o `null` si es de contado o anterior al vínculo con deudores. */
+  deudor: Deudor | null;
   vendedor: VendedorVenta;
   subtotalBrutoCentavos: number;
   descuentoManualCentavos: number;
@@ -334,8 +357,13 @@ export type VentaConsultada = {
   fechaHoraLimiteModificacion: string | null;
   origen: OrigenVenta;
   modalidadEntrega: ModalidadEntrega;
-  /** Nulo si la venta no tiene cliente asociado. */
+  /**
+   * @deprecated Solo lectura: texto libre de las ventas anteriores al vínculo con deudores; nulo en las demás.
+   * Usar `deudor`.
+   */
   clienteReferencia: string | null;
+  /** Deudor de la venta con sus cuatro datos, o `null` si es de contado o anterior al vínculo con deudores. */
+  deudor: Deudor | null;
   vendedor: VendedorVenta;
   /** Montos como texto con 2 decimales. */
   subtotalBruto: string;
