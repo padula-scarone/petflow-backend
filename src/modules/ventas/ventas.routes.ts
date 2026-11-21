@@ -16,7 +16,7 @@ export const ventasRouter = Router();
 // POST /api/ventas: registrar una venta (cobrada o fiado). Requiere sesión validada (CUB 1.1)
 ventasRouter.post("/", requerirRol("VENDEDOR", "GESTOR_COMERCIAL", "GERENTE"), postRegistrarVenta);
 
-// GET /api/ventas: historial paginado con filtros (fecha, producto, estado). Requiere sesión validada (CUB 1.2)
+// GET /api/ventas: historial paginado con filtros (fecha, producto, estado, origen, medio de pago, deudor y comprobante). Requiere sesión validada (CUB 1.2)
 ventasRouter.get("/", requerirRol("VENDEDOR", "GESTOR_COMERCIAL", "GERENTE"), getConsultarHistorial);
 
 // GET /api/ventas/:idVenta: detalle de una venta con ítems y pagos. Requiere sesión validada; no exige caja abierta
