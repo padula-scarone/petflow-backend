@@ -193,7 +193,10 @@ model Venta {
   fechaHoraPago     DateTime?        @map("fecha_hora_pago") @db.Timestamptz(6)
   origen            OrigenVenta
   modalidadEntrega  ModalidadEntrega @map("modalidad_entrega")
+  // Obsoleto: texto libre de las ventas anteriores al vinculo con deudores. Ya no se escribe; se conserva solo para leerlo
   clienteReferencia String?          @map("cliente_referencia") @db.VarChar(100)
+  // Deudor del fiado. Nulo en las ventas de contado y en las anteriores al vinculo (obligatorio solo en el alta de un fiado, lo valida el esquema)
+  idDeudor          Int?             @map("id_deudor")
   subtotalBruto     Decimal          @map("subtotal_bruto") @db.Decimal(12, 2)
   descuentoManual   Decimal          @default(0.00) @map("descuento_manual") @db.Decimal(10, 2)
   // Obligatorio (a nivel de aplicacion) cuando hay descuento manual; nulo en ventas sin descuento o anteriores
@@ -212,6 +215,8 @@ model Venta {
   // Quien anuló (puede ser distinto del vendedor); relación con nombre propio porque Venta ya apunta a Usuario por `usuario`
   usuarioAnulacion Usuario? @relation("VentaUsuarioAnulacion", fields: [idUsuarioAnulacion], references: [idUsuario])
   caja     SesionCaja?  @relation(fields: [idCaja], references: [idCaja])
+  // Replica la FK ya aplicada a mano en la base (ON DELETE RESTRICT, ON UPDATE CASCADE): un deudor con ventas no se puede borrar
+  deudor   Deudor?      @relation(fields: [idDeudor], references: [idDeudor], onDelete: Restrict, onUpdate: Cascade, map: "ventas_id_deudor_fkey")
   pagos    PagoVenta[]
   detalles DetalleVenta[]
   cambiosOriginados CambioMercaderia[]
@@ -220,6 +225,7 @@ model Venta {
   @@index([estado])
   @@index([idCaja])
   @@index([clienteReferencia])
+  @@index([idDeudor], map: "ventas_id_deudor_idx")
   @@map("ventas")
 }
 
@@ -326,6 +332,8 @@ model Deudor {
   telefono       String @db.VarChar(15)
   // Solo digitos, 7 u 8, sin puntos; texto para conservar ceros a la izquierda
   dni            String @unique @db.VarChar(8)
+
+  ventas         Venta[]
 
   @@map("deudores")
 }
