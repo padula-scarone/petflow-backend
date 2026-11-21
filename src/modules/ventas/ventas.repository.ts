@@ -1,6 +1,7 @@
 import type { Prisma } from "../../generated/prisma/client.js";
 import { prisma } from "../../shared/prisma.js";
 import { construirCondicionCambiosActivos } from "../cambios-mercaderia/cambios-mercaderia.repository.js";
+import type { Deudor } from "../deudores/deudores.types.js";
 import type { DecimalExacto } from "../inventario/inventario.types.js";
 import {
   crearErrorAnulacionSimultanea,
@@ -28,6 +29,26 @@ import type {
   VentaDetallada,
 } from "./ventas.types.js";
 
+// --- CONSTANTES ---
+
+/**
+ * Columnas del deudor completo que devuelven el alta y el detalle: las cuatro de la API, para que una columna
+ * futura no se filtre sola. Copia local de la de `deudores.repository.ts` (que usa el `prisma` global, fuera
+ * de la transacción del alta). Deuda técnica: duplicación mínima entre módulos.
+ */
+const SELECCION_DEUDOR_COMPLETO = {
+  idDeudor: true,
+  nombreCompleto: true,
+  telefono: true,
+  dni: true,
+} satisfies Prisma.DeudorSelect;
+
+/** Columnas del deudor en la grilla del historial: sin DNI ni teléfono (RNF-VENTAS-03). */
+const SELECCION_DEUDOR_RESUMIDO = {
+  idDeudor: true,
+  nombreCompleto: true,
+} satisfies Prisma.DeudorSelect;
+
 // --- TIPOS DEL REPOSITORIO ---
 
 /** Datos de la venta ya guardada que necesita el service para armar la respuesta. */
@@ -40,12 +61,15 @@ export type VentaPersistida = {
   fechaHora: Date;
   /** Pagos calculados con su recibido y vuelto; vacío en un fiado. */
   pagos: PagoCobroCalculado[];
+  /** Deudor leído al registrar (el de `idDeudor`); nulo en una venta de contado. */
+  deudor: Deudor | null;
 };
 
-/** Función de cálculo que inyecta el service; recibe lo leído de la BD y devuelve los totales. */
+/** Función de cálculo que inyecta el service; recibe lo leído de la BD (incluido el deudor, si lo hay) y devuelve los totales. */
 type CalcularVenta = (
   productos: ProductoVigente[],
   medios: MedioPagoVigente[],
+  deudor: Deudor | null,
 ) => TotalesVentaCalculados;
 
 /** Función de cálculo del cobro que inyecta el service; recibe la venta (o `null`) y los medios leídos. */
@@ -66,8 +90,8 @@ type EvaluarAnulacion = (venta: VentaAnulable | null, hayCajaAbierta: boolean) =
  * @param input Cuerpo validado de la venta más el vendedor tomado del token.
  * @param calcular Cálculo de negocio, ejecutado dentro de la transacción con datos recién leídos.
  * @returns Los datos de la venta persistida.
- * @throws {ErrorNegocio} Usuario inexistente o inactivo (404/400), no hay caja abierta (409) o
- * otra venta consumió el stock antes de descontarlo (409). Se lanza como objeto puro, no como Error.
+ * @throws {ErrorNegocio} Usuario inexistente o inactivo (404/400), deudor inexistente (404, lo lanza el cálculo),
+ * no hay caja abierta (409) o otra venta consumió el stock antes de descontarlo (409). Se lanza como objeto puro, no como Error.
  */
 export async function registrarVentaAtomica(
   input: RegistrarVentaInput,
@@ -87,6 +111,16 @@ export async function registrarVentaAtomica(
     }
 
     // --- LECTURA Y CÁLCULO ---
+    // El deudor se lee junto con las demás referencias y ANTES de descontar stock: si no existe, el cálculo
+    // responde 404 y la transacción se revierte sin haber escrito nada. Solo se consulta si el body trajo `idDeudor`
+    // (el esquema lo admite únicamente en un fiado). La misma lectura alimenta la respuesta: no hay una segunda consulta
+    const deudor =
+      input.idDeudor === undefined
+        ? null
+        : await tx.deudor.findUnique({
+            where: { idDeudor: input.idDeudor },
+            select: SELECCION_DEUDOR_COMPLETO,
+          });
     const productos = await tx.producto.findMany({
       where: { idProducto: { in: input.items.map((item) => item.idProducto) } },
     });
@@ -112,6 +146,7 @@ export async function registrarVentaAtomica(
         activo: medio.estado === "ACTIVO",
         ajusteBp: aBasisPoints(medio.porcentajeRecargo) - aBasisPoints(medio.porcentajeDescuento),
       })),
+      deudor,
     );
 
     // --- CAJA ---
@@ -153,7 +188,8 @@ export async function registrarVentaAtomica(
         origen: input.origen,
         modalidadEntrega: input.modalidadEntrega,
         estado: calculo.estado,
-        clienteReferencia: input.clienteReferencia ?? null,
+        // `clienteReferencia` ya no se escribe: queda nulo. El deudor es nulo en contado (el esquema no lo admite ahí)
+        idDeudor: input.idDeudor ?? null,
         subtotalBruto: centavosAString(calculo.subtotalBrutoCentavos),
         descuentoManual: centavosAString(calculo.descuentoManualCentavos),
         // El esquema Zod garantiza que existe si y solo si hay descuento
@@ -202,6 +238,7 @@ export async function registrarVentaAtomica(
       estado: calculo.estado,
       fechaHora: venta.fechaHora,
       pagos: calculo.pagos,
+      deudor,
     };
   });
 }
@@ -503,9 +540,11 @@ function construirCondicionHistorial(filtro: FiltroHistorialVentas, idsVentasMix
       ? { pagos: { some: { idMedioPago: filtro.medioPago } }, idVenta: { notIn: idsVentasMixtas } }
       : {}),
     ...(filtro.medioPago === "MIXTO" ? { idVenta: { in: idsVentasMixtas } } : {}),
-    // "contains" con mode insensitive: coincidencia parcial sin distinguir mayúsculas. `%` y `_` actúan como comodines de LIKE
+    // Cliente = nombre del deudor. "is" sobre la relación opcional: una venta sin deudor (contado o anterior al vínculo)
+    // no tiene fila relacionada y nunca coincide. "contains" con mode insensitive: coincidencia parcial sin distinguir
+    // mayúsculas; `%` y `_` actúan como comodines de LIKE. La clave `deudor` no se repite en ningún otro filtro
     ...(filtro.textoCliente !== undefined
-      ? { clienteReferencia: { contains: filtro.textoCliente, mode: "insensitive" } }
+      ? { deudor: { is: { nombreCompleto: { contains: filtro.textoCliente, mode: "insensitive" } } } }
       : {}),
     ...(filtro.numeroComprobante !== undefined
       ? { numeroComprobante: { contains: filtro.numeroComprobante, mode: "insensitive" } }
@@ -553,7 +592,10 @@ export async function buscarHistorialVentas(
           fechaHoraPago: true,
           estado: true,
           montoTotal: true,
+          // Obsoleto, pero las ventas anteriores al vínculo con deudores lo conservan
           clienteReferencia: true,
+          // En el mismo select de la venta (un JOIN, sin consulta por fila)
+          deudor: { select: SELECCION_DEUDOR_RESUMIDO },
           origen: true,
           modalidadEntrega: true,
         },
@@ -575,6 +617,7 @@ export async function buscarHistorialVentas(
           estado: fila.estado,
           montoTotalCentavos: aCentavos(fila.montoTotal),
           clienteReferencia: fila.clienteReferencia,
+          deudor: fila.deudor,
           origen: fila.origen,
           modalidadEntrega: fila.modalidadEntrega,
           // Las ventas sin cambios no vienen del groupBy: valen 0
@@ -611,7 +654,10 @@ export async function buscarVentaPorId(idVenta: number): Promise<VentaDetallada 
       estado: true,
       origen: true,
       modalidadEntrega: true,
+      // Obsoleto, pero las ventas anteriores al vínculo con deudores lo conservan
       clienteReferencia: true,
+      // En el mismo select de la venta (sin consulta aparte); nulo en contado y en ventas anteriores al vínculo
+      deudor: { select: SELECCION_DEUDOR_COMPLETO },
       subtotalBruto: true,
       descuentoManual: true,
       motivoDescuento: true,
@@ -672,6 +718,7 @@ export async function buscarVentaPorId(idVenta: number): Promise<VentaDetallada 
     origen: venta.origen,
     modalidadEntrega: venta.modalidadEntrega,
     clienteReferencia: venta.clienteReferencia,
+    deudor: venta.deudor,
     vendedor: { idUsuario: venta.usuario.idUsuario, nombre: venta.usuario.nombre },
     subtotalBrutoCentavos: aCentavos(venta.subtotalBruto),
     descuentoManualCentavos: aCentavos(venta.descuentoManual),

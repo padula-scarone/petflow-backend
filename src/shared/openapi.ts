@@ -150,6 +150,36 @@ const errorValidacionInicioSesion = {
   },
 };
 
+// --- DEUDOR EN LAS RESPUESTAS DE VENTAS ---
+// Van antes de las respuestas que los usan: una constante no se puede leer antes de su declaración al cargar el módulo.
+// Los ejemplos usan datos claramente falsos (DNI 99000001, teléfono 5491100000001).
+
+/** Deudor tal como lo devuelve la API (ver `Deudor`): las cuatro columnas, sin ningún otro dato. */
+const deudor = {
+  type: "object",
+  properties: {
+    idDeudor: { type: "integer", example: 1 },
+    nombreCompleto: { type: "string", example: "Prueba Uno" },
+    telefono: {
+      type: "string",
+      example: "5491100000001",
+      description: "Solo dígitos (de 11 a 15), con código de país: se guarda normalizado, sin espacios, guiones ni `+`",
+    },
+    dni: { type: "string", example: "99000001", description: "De 7 u 8 dígitos, sin puntos. Es único: no hay dos deudores con el mismo DNI" },
+  },
+  required: ["idDeudor", "nombreCompleto", "telefono", "dni"],
+};
+
+/** Deudor en la grilla del historial (ver `DeudorResumido`): solo id y nombre, sin DNI ni teléfono (RNF-VENTAS-03). */
+const deudorResumido = {
+  type: "object",
+  properties: {
+    idDeudor: { type: "integer", example: 1 },
+    nombreCompleto: { type: "string", example: "Prueba Uno" },
+  },
+  required: ["idDeudor", "nombreCompleto"],
+};
+
 /** Respuesta exitosa de `POST /api/ventas` (ver `RegistrarVentaResponse`). */
 const ventaRegistrada = {
   type: "object",
@@ -194,9 +224,14 @@ const ventaRegistrada = {
             required: ["idMedioPago", "montoFinal", "montoRecibido", "vuelto"],
           },
         },
+        deudor: {
+          ...deudor,
+          nullable: true,
+          description: "Deudor del fiado, con sus cuatro datos. Nulo en una venta de contado",
+        },
       },
       // numeroComprobante nunca es nulo: se emite siempre, incluso en un fiado
-      required: ["idVenta", "numeroComprobante", "montoTotal", "estado", "fechaHora", "pagos"],
+      required: ["idVenta", "numeroComprobante", "montoTotal", "estado", "fechaHora", "pagos", "deudor"],
     },
   },
 };
@@ -255,7 +290,19 @@ const historialConsultado = {
               "Misma regla que la anulación. Nulo si la venta está ANULADA",
           },
           montoTotal: { type: "string", example: "1425.00" },
-          clienteReferencia: { type: "string", nullable: true, example: "Maria Lopez" },
+          clienteReferencia: {
+            type: "string",
+            nullable: true,
+            deprecated: true,
+            example: "Maria Lopez",
+            description:
+              "OBSOLETO, solo lectura: texto libre de las ventas anteriores al vínculo con deudores. Las ventas nuevas lo dejan nulo. Usar `deudor`",
+          },
+          deudor: {
+            ...deudorResumido,
+            nullable: true,
+            description: "Deudor de la venta (id y nombre). Nulo en una venta de contado y en las anteriores al vínculo con deudores",
+          },
           origen: { type: "string", enum: ["MOSTRADOR", "DIGITAL"] },
           modalidadEntrega: { type: "string", enum: ["RETIRO", "ENVIO"] },
           cantidadCambiosActivos: {
@@ -272,6 +319,7 @@ const historialConsultado = {
           "fechaHoraLimiteModificacion",
           "montoTotal",
           "clienteReferencia",
+          "deudor",
           "origen",
           "modalidadEntrega",
           "cantidadCambiosActivos",
@@ -365,7 +413,21 @@ const ventaConsultada = {
         },
         origen: { type: "string", enum: ["MOSTRADOR", "DIGITAL"] },
         modalidadEntrega: { type: "string", enum: ["RETIRO", "ENVIO"] },
-        clienteReferencia: { type: "string", nullable: true, example: "Maria Lopez" },
+        clienteReferencia: {
+          type: "string",
+          nullable: true,
+          deprecated: true,
+          example: "Maria Lopez",
+          description:
+            "OBSOLETO, solo lectura: texto libre de las ventas anteriores al vínculo con deudores. Las ventas nuevas lo dejan nulo. Usar `deudor`",
+        },
+        deudor: {
+          ...deudor,
+          nullable: true,
+          description:
+            "Deudor de la venta con sus cuatro datos. Nulo en una venta de contado y en las anteriores al vínculo con deudores " +
+            "(que conservan su `clienteReferencia`)",
+        },
         vendedor: {
           type: "object",
           properties: {
@@ -469,6 +531,7 @@ const ventaConsultada = {
         "origen",
         "modalidadEntrega",
         "clienteReferencia",
+        "deudor",
         "vendedor",
         "subtotalBruto",
         "descuentoManual",
@@ -1142,8 +1205,9 @@ const descripcionesParametrosHistorial: Record<string, string> = {
     `Con \`${VALOR_MEDIO_PAGO_MIXTO}\`: ventas con más de un pago. Las ventas mixtas salen únicamente con \`${VALOR_MEDIO_PAGO_MIXTO}\` ` +
     "(nunca con un id): ambos filtros son conjuntos disjuntos. Un fiado pendiente no tiene pagos, así que no coincide con ninguno.",
   textoCliente:
-    `Texto contenido en la referencia del cliente (máximo ${TEXTO_CLIENTE_LONGITUD_MAXIMA} caracteres), sin distinguir mayúsculas. ` +
-    "Las ventas sin cliente no coinciden. Vacío equivale a no filtrar. Los caracteres `%` y `_` actúan como comodines.",
+    `Texto contenido en el nombre del deudor (máximo ${TEXTO_CLIENTE_LONGITUD_MAXIMA} caracteres), sin distinguir mayúsculas. ` +
+    "Las ventas sin deudor (de contado o anteriores al vínculo con deudores) no coinciden. Vacío equivale a no filtrar. " +
+    "Los caracteres `%` y `_` actúan como comodines.",
   numeroComprobante:
     `Texto contenido en el número de comprobante (máximo ${NUMERO_COMPROBANTE_LONGITUD_MAXIMA} caracteres), sin distinguir mayúsculas. ` +
     "Coincidencia parcial, no exacta. Vacío equivale a no filtrar. Los caracteres `%` y `_` actúan como comodines.",
@@ -1280,21 +1344,7 @@ const mediosPagoListados = {
 // --- DEUDORES ---
 // Todos los ejemplos usan datos claramente falsos (DNI 99000001, teléfono 5491100000001).
 
-/** Deudor tal como lo devuelve la API (ver `Deudor`): las cuatro columnas, sin ningún otro dato. */
-const deudor = {
-  type: "object",
-  properties: {
-    idDeudor: { type: "integer", example: 1 },
-    nombreCompleto: { type: "string", example: "Prueba Uno" },
-    telefono: {
-      type: "string",
-      example: "5491100000001",
-      description: "Solo dígitos (de 11 a 15), con código de país: se guarda normalizado, sin espacios, guiones ni `+`",
-    },
-    dni: { type: "string", example: "99000001", description: "De 7 u 8 dígitos, sin puntos. Es único: no hay dos deudores con el mismo DNI" },
-  },
-  required: ["idDeudor", "nombreCompleto", "telefono", "dni"],
-};
+// (`deudor` y `deudorResumido` se declaran más arriba, antes de las respuestas de ventas que los usan)
 
 // El body se deriva del esquema Zod real (io "input" = lo que envía el cliente); el formato de cada campo
 // se agrega aparte porque Zod no lo guarda como descripción y el patrón derivado no cubre la cantidad de dígitos
@@ -1597,9 +1647,10 @@ export const openapiDocument = {
         summary: "Consultar el historial de ventas (paginado, con filtros)",
         description:
           "Alimenta la grilla del historial. Orden fijo: fecha descendente con desempate por id descendente. " +
-          "Los filtros son opcionales y se combinan con AND (fechas, producto, estado, origen, medio de pago, cliente y comprobante). " +
+          "Los filtros son opcionales y se combinan con AND (fechas, producto, estado, origen, medio de pago, nombre del deudor y comprobante). " +
           "Una página fuera de rango devuelve 200 con lista vacía. " +
-          "Cada venta trae `fechaHoraLimiteModificacion` y `cantidadCambiosActivos`, y la raíz `fechaHoraServidor`. " +
+          "Cada venta trae `fechaHoraLimiteModificacion`, `cantidadCambiosActivos` y `deudor` (id y nombre; nulo si es de contado o anterior al vínculo con deudores), y la raíz `fechaHoraServidor`. " +
+          "`clienteReferencia` es obsoleto y solo lectura: las ventas anteriores lo conservan. " +
           "No incluye detalles ni pagos de cada venta. Requiere sesión (roles VENDEDOR, GESTOR_COMERCIAL o GERENTE); no exige caja abierta.",
         parameters: parametrosHistorial,
         responses: {
@@ -1610,7 +1661,7 @@ export const openapiDocument = {
           "400": {
             description:
               "Parámetros de consulta inválidos (formato, rango, fecha inexistente, rango de fechas invertido, `origen` fuera de MOSTRADOR/DIGITAL, " +
-              "`medioPago` que no es un id positivo ni `MIXTO` en mayúsculas, o `textoCliente` / `numeroComprobante` más largos que su máximo)",
+              "`medioPago` que no es un id positivo ni `MIXTO` en mayúsculas, o `textoCliente` (nombre del deudor) / `numeroComprobante` más largos que su máximo)",
             content: { "application/json": { schema: errorValidacionConsulta } },
           },
           ...respuestasProteccion,
@@ -1621,7 +1672,10 @@ export const openapiDocument = {
         security: [{ bearerAuth: [] }],
         summary: "Registrar una venta (cobrada o fiado)",
         description:
-          "Con `pagos` vacío la venta queda `PENDIENTE_PAGO` (fiado) y exige `clienteReferencia`. " +
+          "Con `pagos` vacío la venta queda `PENDIENTE_PAGO` (fiado) y exige `idDeudor` (400 si falta). " +
+          "En una venta de contado (`pagos` no vacío) `idDeudor` no se admite (400). Un deudor inexistente da 404 con `codigo` `DEUDOR_NO_ENCONTRADO`, " +
+          "sin descontar stock ni crear nada. La respuesta trae `deudor` con sus cuatro datos, o `null` en contado. " +
+          "`clienteReferencia` ya no forma parte del contrato: si llega se descarta sin error y no se guarda. " +
           "Descuenta stock y congela precio y costo de cada ítem. Los cobros se asocian a la última caja abierta. " +
           "Toda venta, cobrada o fiado, devuelve su `numeroComprobante` (ticket de pago o ticket de deuda). " +
           "El vendedor es el usuario del token: un `idUsuario` en el body se ignora sin error. " +
@@ -1646,14 +1700,17 @@ export const openapiDocument = {
           "400": {
             description:
               "Body inválido o regla de negocio incumplida (stock, montos, producto inactivo, descuento sin motivo o motivo sin descuento, " +
+              "fiado sin `idDeudor`, venta de contado con `idDeudor`, " +
               "`montoRecibido` menor al monto final o en un medio que no es efectivo)",
             content: {
               "application/json": { schema: { oneOf: [errorValidacion, errorNegocio] } },
             },
           },
           "404": {
-            description: "Usuario, producto o medio de pago inexistente",
-            content: { "application/json": { schema: errorNegocio } },
+            description:
+              "Usuario, deudor (`codigo` `DEUDOR_NO_ENCONTRADO`), producto o medio de pago inexistente. " +
+              "Solo el del deudor trae `codigo`",
+            content: { "application/json": { schema: { oneOf: [errorNegocio, deudorInexistente] } } },
           },
           "409": {
             description: "No hay una caja abierta",
@@ -1673,6 +1730,8 @@ export const openapiDocument = {
           "Los importes salen tal como se guardaron: precio unitario y porcentaje aplicado de ese momento. " +
           "El tipo de comprobante se deduce de `estado`. No devuelve el costo congelado. " +
           "Devuelve `motivoDescuento` (nivel venta) y, en cada pago, `montoRecibido` y `vuelto`; son nulos en ventas anteriores o cuando no aplican. " +
+          "Devuelve `deudor` con sus cuatro datos, nulo en una venta de contado y en las anteriores al vínculo con deudores " +
+          "(que conservan `clienteReferencia`, obsoleto y solo lectura). " +
           "Devuelve `anulacion` (fecha, motivo y usuario que anuló), nula si la venta no está ANULADA o se anuló antes de que se registrara la auditoría. " +
           "Devuelve `fechaHoraServidor` en la raíz, `venta.fechaHoraLimiteModificacion` (nula si está ANULADA) y, por ítem, `cantidadYaDevuelta`. " +
           "Solo lectura: no modifica stock, caja ni estado. Cualquier rol autorizado ve cualquier venta " +

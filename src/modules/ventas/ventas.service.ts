@@ -5,6 +5,9 @@ import {
   liquidarFiadoAtomico,
   registrarVentaAtomica,
 } from "./ventas.repository.js";
+// Deuda técnica: importación entre módulos (deudores ya importa de ventas); el error debería vivir en `shared`
+import { crearErrorDeudorNoEncontrado } from "../deudores/deudores.errors.js";
+import type { Deudor } from "../deudores/deudores.types.js";
 import {
   crearErrorNegocio,
   crearErrorSinCajaParaAnular,
@@ -68,14 +71,14 @@ const MILISEGUNDOS_POR_MINUTO = 60_000;
 /**
  * Registra una venta: calcula con reglas puras y persiste en una única transacción.
  * El cálculo se inyecta al repositorio como función para que corra dentro de la transacción,
- * con los datos leídos en ese mismo momento.
+ * con los datos leídos en ese mismo momento (incluido el deudor, si la venta lo trae).
  * @param input Cuerpo ya validado por Zod.
  * @returns Respuesta lista para enviar al frontend.
  * @throws {ErrorNegocio} Si alguna regla de negocio no se cumple (nada queda escrito).
  */
 export async function registrarVenta(input: RegistrarVentaInput): Promise<RegistrarVentaResponse> {
-  const venta = await registrarVentaAtomica(input, (productos, medios) =>
-    calcularVenta(input, productos, medios),
+  const venta = await registrarVentaAtomica(input, (productos, medios, deudor) =>
+    calcularVenta(input, productos, medios, deudor),
   );
 
   const esFiado = venta.estado === "PENDIENTE_PAGO";
@@ -93,6 +96,8 @@ export async function registrarVenta(input: RegistrarVentaInput): Promise<Regist
       fechaHora: venta.fechaHora.toISOString(),
       // Con el recibido y el vuelto ya calculados, el front los muestra sin consultar de nuevo la venta
       pagos: venta.pagos.map(convertirPagoCobrado),
+      // Nulo en contado: el repositorio solo lo lee si el body trajo `idDeudor`
+      deudor: venta.deudor,
     },
   };
 }
@@ -105,8 +110,9 @@ export async function registrarVenta(input: RegistrarVentaInput): Promise<Regist
  * @param input Cuerpo validado de la venta.
  * @param productos Productos leídos de la BD con sus valores vigentes.
  * @param medios Medios de pago leídos de la BD, con su tipo.
+ * @param deudor Deudor leído de la BD para `input.idDeudor`, o `null` si el body no lo trajo o no existe.
  * @returns Líneas, pagos (con recibido y vuelto si corresponde), totales y estado final de la venta.
- * @throws {ErrorNegocio} Producto o medio inexistente/inactivo, cantidad inválida, descuento excesivo,
+ * @throws {ErrorNegocio} Deudor, producto o medio inexistente/inactivo, cantidad inválida, descuento excesivo,
  * pagos que no cuadran, stock insuficiente en algún producto, monto recibido en un medio que no es efectivo
  * o menor al monto final. Se lanza como objeto puro, no como Error.
  */
@@ -114,7 +120,14 @@ export function calcularVenta(
   input: RegistrarVentaInput,
   productos: ProductoVigente[],
   medios: MedioPagoVigente[],
+  deudor: Deudor | null,
 ): TotalesVentaCalculados {
+  // Primera comprobación: un deudor inexistente (404) no puede quedar tapado por un error de stock o de producto.
+  // Que un fiado traiga deudor y un contado no, ya lo garantiza el esquema Zod
+  if (input.idDeudor !== undefined && deudor === null) {
+    throw crearErrorDeudorNoEncontrado(input.idDeudor);
+  }
+
   const productosPorId = new Map(productos.map((producto) => [producto.idProducto, producto]));
 
   // Cada línea congela precio y costo vigentes: cambios futuros de precio no alteran ventas pasadas
@@ -421,7 +434,9 @@ function convertirFilaHistorial(fila: FilaHistorialVenta): VentaHistorial {
     estado: fila.estado,
     fechaHoraLimiteModificacion: limiteModificacion === null ? null : limiteModificacion.toISOString(),
     montoTotal: formatearCentavos(fila.montoTotalCentavos),
+    // Solo lectura: las ventas anteriores al vínculo con deudores conservan este texto y su `deudor` es nulo
     clienteReferencia: fila.clienteReferencia,
+    deudor: fila.deudor,
     origen: fila.origen,
     modalidadEntrega: fila.modalidadEntrega,
     cantidadCambiosActivos: fila.cantidadCambiosActivos,
@@ -464,7 +479,9 @@ function convertirVentaDetallada(venta: VentaDetallada): ConsultarVentaResponse[
     fechaHoraLimiteModificacion: limiteModificacion === null ? null : limiteModificacion.toISOString(),
     origen: venta.origen,
     modalidadEntrega: venta.modalidadEntrega,
+    // Solo lectura: las ventas anteriores al vínculo con deudores conservan este texto y su `deudor` es nulo
     clienteReferencia: venta.clienteReferencia,
+    deudor: venta.deudor,
     vendedor: venta.vendedor,
     subtotalBruto: formatearCentavos(venta.subtotalBrutoCentavos),
     descuentoManual: formatearCentavos(venta.descuentoManualCentavos),
