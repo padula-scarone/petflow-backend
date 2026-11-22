@@ -8,6 +8,9 @@ import {
 // Deuda técnica: importación entre módulos (deudores ya importa de ventas); el error debería vivir en `shared`
 import { crearErrorDeudorNoEncontrado } from "../deudores/deudores.errors.js";
 import type { Deudor } from "../deudores/deudores.types.js";
+import { Decimal } from "../../shared/decimal.js";
+import { calcularHoyArgentina, HORAS_DESFASE_ARGENTINA_RESPECTO_UTC } from "../../shared/fecha-argentina.js";
+import { calcularImporteAdeudado } from "../../shared/importe-adeudado.js";
 import {
   crearErrorNegocio,
   crearErrorSinCajaParaAnular,
@@ -54,9 +57,6 @@ import type {
 
 // --- CONSTANTES ---
 
-/** Horas que Argentina (UTC-3, sin horario de verano) está por detrás de UTC. */
-const HORAS_DESFASE_ARGENTINA_RESPECTO_UTC = 3;
-
 /**
  * Minutos que dura la ventana para anular una venta, contados desde el pago (o desde la venta si no hay pago).
  * Se exporta para que los cambios de mercadería reutilicen la misma regla.
@@ -78,7 +78,8 @@ const MILISEGUNDOS_POR_MINUTO = 60_000;
  */
 export async function registrarVenta(input: RegistrarVentaInput): Promise<RegistrarVentaResponse> {
   const venta = await registrarVentaAtomica(input, (productos, medios, deudor) =>
-    calcularVenta(input, productos, medios, deudor),
+    // El reloj se toma aquí, dentro de la transacción, y se inyecta: `calcularVenta` sigue siendo pura (decide qué es "hoy")
+    calcularVenta(input, productos, medios, deudor, new Date()),
   );
 
   const esFiado = venta.estado === "PENDIENTE_PAGO";
@@ -98,6 +99,8 @@ export async function registrarVenta(input: RegistrarVentaInput): Promise<Regist
       pagos: venta.pagos.map(convertirPagoCobrado),
       // Nulo en contado: el repositorio solo lo lee si el body trajo `idDeudor`
       deudor: venta.deudor,
+      // Lo que quedó guardado (releído de la base), no un eco del body: nulo en contado y en un fiado sin fecha
+      fechaEstimadaPago: venta.fechaEstimadaPago,
     },
   };
 }
@@ -111,21 +114,30 @@ export async function registrarVenta(input: RegistrarVentaInput): Promise<Regist
  * @param productos Productos leídos de la BD con sus valores vigentes.
  * @param medios Medios de pago leídos de la BD, con su tipo.
  * @param deudor Deudor leído de la BD para `input.idDeudor`, o `null` si el body no lo trajo o no existe.
+ * @param ahora Instante actual del servidor: define qué día es "hoy" en Argentina para validar la fecha estimada de pago.
  * @returns Líneas, pagos (con recibido y vuelto si corresponde), totales y estado final de la venta.
- * @throws {ErrorNegocio} Deudor, producto o medio inexistente/inactivo, cantidad inválida, descuento excesivo,
- * pagos que no cuadran, stock insuficiente en algún producto, monto recibido en un medio que no es efectivo
- * o menor al monto final. Se lanza como objeto puro, no como Error.
+ * @throws {ErrorNegocio} Deudor inexistente (404), fecha estimada de pago anterior a hoy (400), producto o medio
+ * inexistente/inactivo, cantidad inválida, descuento excesivo, pagos que no cuadran, stock insuficiente en algún producto,
+ * monto recibido en un medio que no es efectivo o menor al monto final. Se lanza como objeto puro, no como Error.
  */
 export function calcularVenta(
   input: RegistrarVentaInput,
   productos: ProductoVigente[],
   medios: MedioPagoVigente[],
   deudor: Deudor | null,
+  ahora: Date,
 ): TotalesVentaCalculados {
   // Primera comprobación: un deudor inexistente (404) no puede quedar tapado por un error de stock o de producto.
   // Que un fiado traiga deudor y un contado no, ya lo garantiza el esquema Zod
   if (input.idDeudor !== undefined && deudor === null) {
     throw crearErrorDeudorNoEncontrado(input.idDeudor);
+  }
+
+  // La fecha estimada de pago no puede ser anterior a hoy (en hora de Argentina); hoy sí vale. Va antes de recorrer los ítems:
+  // si se rechaza no se llegó a descontar stock. Es solo informativa: no cambia ningún cálculo posterior.
+  // Zod ya garantizó que viene en un fiado y con formato válido; la comparación de texto equivale a la cronológica (AAAA-MM-DD)
+  if (input.fechaEstimadaPago != null && input.fechaEstimadaPago < calcularHoyArgentina(ahora)) {
+    throw crearErrorNegocio("La fecha estimada de pago no puede ser anterior a hoy", 400);
   }
 
   const productosPorId = new Map(productos.map((producto) => [producto.idProducto, producto]));
@@ -482,6 +494,7 @@ function convertirVentaDetallada(venta: VentaDetallada): ConsultarVentaResponse[
     // Solo lectura: las ventas anteriores al vínculo con deudores conservan este texto y su `deudor` es nulo
     clienteReferencia: venta.clienteReferencia,
     deudor: venta.deudor,
+    fechaEstimadaPago: venta.fechaEstimadaPago,
     vendedor: venta.vendedor,
     subtotalBruto: formatearCentavos(venta.subtotalBrutoCentavos),
     descuentoManual: formatearCentavos(venta.descuentoManualCentavos),
@@ -592,7 +605,10 @@ export function calcularCobroFiado(
 
   // Se cobra lo que se debe (subtotal − descuento) y no el montoTotal guardado:
   // el cobro es total y el descuento manual solo se carga en el alta
-  const importeAdeudadoCentavos = venta.subtotalBrutoCentavos - venta.descuentoManualCentavos;
+  const importeAdeudadoCentavos = calcularImporteAdeudado(
+    new Decimal(venta.subtotalBrutoCentavos),
+    new Decimal(venta.descuentoManualCentavos),
+  ).toNumber();
   const pagos = adjuntarMontoRecibidoYVuelto(
     input.pagos,
     calcularPagosVenta(input.pagos, medios, importeAdeudadoCentavos),

@@ -67,7 +67,8 @@ function responderErrorNegocio(res: Response, errorCapturado: unknown): boolean 
  * Handler de `POST /api/ventas`.
  * Valida el body y delega en el service. No contiene reglas de negocio.
  * El vendedor es el usuario del token (`res.locals.sesion`, que deja `requerirRol`); un `idUsuario` en el body se ignora.
- * Respuestas: 201 si se registra (con el `deudor` si es un fiado); 400 con detalle por campo si el body es inválido;
+ * Respuestas: 201 si se registra (con el `deudor` y la `fechaEstimadaPago` si es un fiado); 400 con detalle por campo si el body es inválido
+ * (incluida una fecha estimada en una venta de contado);
  * el código del error de negocio (400/404/409) si falla una regla de negocio; el 404 de un deudor inexistente suma `codigo`.
  */
 export async function postRegistrarVenta(req: Request, res: Response): Promise<void> {

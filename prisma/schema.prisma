@@ -98,6 +98,7 @@ model Usuario {
   ventasAnuladas Venta[] @relation("VentaUsuarioAnulacion")
   cambios      CambioMercaderia[]
   cambiosAnulados CambioMercaderia[] @relation("CambioUsuarioAnulacion")
+  cobrosDeudor CobroDeudor[]
 
   @@map("usuarios")
 }
@@ -113,6 +114,7 @@ model SesionCaja {
   usuario  Usuario @relation(fields: [idUsuario], references: [idUsuario])
   ventas   Venta[]
   cambios  CambioMercaderia[]
+  cobrosDeudor CobroDeudor[]
 
   @@map("sesiones_caja")
 }
@@ -179,6 +181,7 @@ model MedioPago {
 
   pagos    PagoVenta[]
   cambios  CambioMercaderia[]
+  pagosCobroDeudor PagoCobroDeudor[]
 
   @@map("medios_pago")
 }
@@ -197,7 +200,10 @@ model Venta {
   clienteReferencia String?          @map("cliente_referencia") @db.VarChar(100)
   // Deudor del fiado. Nulo en las ventas de contado y en las anteriores al vinculo (obligatorio solo en el alta de un fiado, lo valida el esquema)
   idDeudor          Int?             @map("id_deudor")
-  subtotalBruto     Decimal          @map("subtotal_bruto") @db.Decimal(12, 2)
+  // Fecha (sin hora) en que el deudor prometio pagar el fiado. Solo informativa: no bloquea ni modifica cobros, saldo ni estados.
+  // Nula en contado y en fiados sin fecha. Columna date: se escribe y se lee como medianoche UTC para que no corra un dia
+  fechaEstimadaPago DateTime?        @map("fecha_estimada_pago") @db.Date
+  subtotalBruto    Decimal          @map("subtotal_bruto") @db.Decimal(12, 2)
   descuentoManual   Decimal          @default(0.00) @map("descuento_manual") @db.Decimal(10, 2)
   // Obligatorio (a nivel de aplicacion) cuando hay descuento manual; nulo en ventas sin descuento o anteriores
   motivoDescuento   String?          @map("motivo_descuento") @db.VarChar(200)
@@ -220,6 +226,7 @@ model Venta {
   pagos    PagoVenta[]
   detalles DetalleVenta[]
   cambiosOriginados CambioMercaderia[]
+  detallesCobroDeudor DetalleCobroDeudor[]
 
   @@index([fechaHora])
   @@index([estado])
@@ -334,6 +341,69 @@ model Deudor {
   dni            String @unique @db.VarChar(8)
 
   ventas         Venta[]
+  cobros         CobroDeudor[]
 
   @@map("deudores")
+}
+
+// 6. COBROS DE DEUDORES
+// Las tres tablas se crean a mano en Supabase (con RLS activo); Prisma solo las mapea.
+// Los nombres de FK, unicos e indices son los de PostgreSQL por defecto (`<tabla>_<columna>_fkey`, `_key`, `_idx`, `_pkey`).
+// Un cobro de deudor es un pago aplicado a uno o varios fiados del mismo deudor. Guarda la caja y el usuario del cobro,
+// que el fiado no tiene (el fiado conserva `idCaja` nulo).
+
+// Un cobro: quien paga (deudor), en que caja, quien lo registro y cuando
+model CobroDeudor {
+  idCobroDeudor Int      @id @default(autoincrement()) @map("id_cobro_deudor")
+  idDeudor      Int      @map("id_deudor")
+  idCaja        Int      @map("id_caja")
+  idUsuario     Int      @map("id_usuario")
+  fechaHora     DateTime @default(now()) @map("fecha_hora") @db.Timestamptz(6)
+  // Nulo hasta que se asigna el recibo (como el comprobante de las ventas)
+  numeroRecibo  String?  @unique(map: "cobros_deudor_numero_recibo_key") @map("numero_recibo") @db.VarChar(30)
+
+  deudor   Deudor      @relation(fields: [idDeudor], references: [idDeudor], onDelete: Restrict, onUpdate: Cascade, map: "cobros_deudor_id_deudor_fkey")
+  caja     SesionCaja  @relation(fields: [idCaja], references: [idCaja], onDelete: Restrict, onUpdate: Cascade, map: "cobros_deudor_id_caja_fkey")
+  usuario  Usuario     @relation(fields: [idUsuario], references: [idUsuario], onDelete: Restrict, onUpdate: Cascade, map: "cobros_deudor_id_usuario_fkey")
+  detalles DetalleCobroDeudor[]
+  pagos    PagoCobroDeudor[]
+
+  @@index([idDeudor], map: "cobros_deudor_id_deudor_idx")
+  @@index([idCaja], map: "cobros_deudor_id_caja_idx")
+  @@map("cobros_deudor")
+}
+
+// Cuanto de un cobro se aplico a cada fiado. La base exige monto > 0 (CHECK); Prisma no puede expresarlo.
+// `yaPagado` de un fiado es la suma de estos montos
+model DetalleCobroDeudor {
+  idDetalleCobroDeudor Int     @id @default(autoincrement()) @map("id_detalle_cobro_deudor")
+  idCobroDeudor        Int     @map("id_cobro_deudor")
+  idVenta              Int     @map("id_venta")
+  monto                Decimal @db.Decimal(12, 2)
+
+  cobro CobroDeudor @relation(fields: [idCobroDeudor], references: [idCobroDeudor], onDelete: Restrict, onUpdate: Cascade, map: "detalles_cobro_deudor_id_cobro_deudor_fkey")
+  venta Venta       @relation(fields: [idVenta], references: [idVenta], onDelete: Restrict, onUpdate: Cascade, map: "detalles_cobro_deudor_id_venta_fkey")
+
+  @@unique([idCobroDeudor, idVenta], map: "detalles_cobro_deudor_id_cobro_deudor_id_venta_key")
+  @@index([idVenta], map: "detalles_cobro_deudor_id_venta_idx")
+  @@map("detalles_cobro_deudor")
+}
+
+// Como se pago un cobro: un medio por fila. La base exige montoBase y montoFinal > 0 (CHECK).
+// Mismas columnas que `pagos_venta`: el recargo o descuento del medio queda congelado en `porcentajeAplicado`
+model PagoCobroDeudor {
+  idPagoCobroDeudor  Int      @id @default(autoincrement()) @map("id_pago_cobro_deudor")
+  idCobroDeudor      Int      @map("id_cobro_deudor")
+  idMedioPago        Int      @map("id_medio_pago")
+  montoBase          Decimal  @map("monto_base") @db.Decimal(12, 2)
+  porcentajeAplicado Decimal  @default(0.00) @map("porcentaje_aplicado") @db.Decimal(5, 2)
+  montoFinal         Decimal  @map("monto_final") @db.Decimal(12, 2)
+  montoRecibido      Decimal? @map("monto_recibido") @db.Decimal(12, 2)
+  vuelto             Decimal? @db.Decimal(12, 2)
+
+  cobro     CobroDeudor @relation(fields: [idCobroDeudor], references: [idCobroDeudor], onDelete: Restrict, onUpdate: Cascade, map: "pagos_cobro_deudor_id_cobro_deudor_fkey")
+  medioPago MedioPago   @relation(fields: [idMedioPago], references: [idMedioPago], onDelete: Restrict, onUpdate: Cascade, map: "pagos_cobro_deudor_id_medio_pago_fkey")
+
+  @@unique([idCobroDeudor, idMedioPago], map: "pagos_cobro_deudor_id_cobro_deudor_id_medio_pago_key")
+  @@map("pagos_cobro_deudor")
 }

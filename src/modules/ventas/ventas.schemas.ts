@@ -81,12 +81,27 @@ const pagoConMontoRecibidoSchema = pagoVentaSchema.extend({
     .optional(),
 });
 
+// --- ESQUEMA DE FECHA DE CALENDARIO ---
+// Va antes de `registrarVentaSchema` porque se evalúa al cargar el módulo: usarlo más arriba que su declaración fallaría.
+
+/**
+ * Fecha `AAAA-MM-DD` que además existe en el calendario.
+ * Los mensajes son fijos y nunca repiten el valor recibido. Un texto vacío o con otro formato se rechaza.
+ * La usan el alta de venta (`fechaEstimadaPago`) y los filtros de fecha de los historiales.
+ */
+export const fechaCalendarioSchema = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, "Debe tener formato AAAA-MM-DD")
+  .refine((fecha) => descomponerFechaCalendario(fecha) !== null, "La fecha no existe en el calendario");
+
 // --- ESQUEMA PRINCIPAL ---
 
 /**
  * Contrato de entrada de `POST /api/ventas`.
  * Si `pagos` viene vacío la venta es un fiado y `idDeudor` pasa a ser obligatorio; en una venta de contado `idDeudor` no se admite.
  * Que el deudor exista lo verifica el service (el esquema no conoce la base).
+ * `fechaEstimadaPago` (`AAAA-MM-DD`) es opcional y nula equivale a omitida ("sin fecha"); solo se admite en un fiado:
+ * una venta de contado con fecha no nula es 400. Que no sea anterior a hoy lo verifica el service (depende del reloj).
  * El vendedor no viaja en el body: sale del token. Si llega `idUsuario`, Zod lo descarta sin error (el objeto no es estricto).
  * Lo mismo pasa con `clienteReferencia`, que ya no forma parte del contrato: se descarta y no se guarda.
  */
@@ -95,6 +110,7 @@ export const registrarVentaSchema = z
     origen: z.enum(["MOSTRADOR", "DIGITAL"]),
     modalidadEntrega: z.enum(["RETIRO", "ENVIO"]),
     idDeudor: z.number().int().positive().max(ID_ENTERO_MAXIMO).optional(),
+    fechaEstimadaPago: fechaCalendarioSchema.nullish(),
     items: z.array(itemVentaSchema).min(1),
     pagos: z.array(pagoConMontoRecibidoSchema),
     descuentoManual: z
@@ -128,6 +144,15 @@ export const registrarVentaSchema = z
         code: "custom",
         path: ["idDeudor"],
         message: "Una venta de contado no admite deudor",
+      });
+    }
+    // La fecha estimada es del fiado: en contado solo se admite ausente o nula (equivale a "sin fecha").
+    // Mensaje fijo, igual que el del deudor: no repite el valor recibido
+    if (!esFiado && data.fechaEstimadaPago !== undefined && data.fechaEstimadaPago !== null) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["fechaEstimadaPago"],
+        message: "Una venta de contado no admite fecha estimada de pago",
       });
     }
 
@@ -250,12 +275,6 @@ export function enteroDesdeTexto(minimo: number, maximo: number) {
     .transform(Number)
     .pipe(z.number().int().min(minimo).max(maximo));
 }
-
-/** Fecha `AAAA-MM-DD` que además existe en el calendario. */
-export const fechaCalendarioSchema = z
-  .string()
-  .regex(/^\d{4}-\d{2}-\d{2}$/, "Debe tener formato AAAA-MM-DD")
-  .refine((fecha) => descomponerFechaCalendario(fecha) !== null, "La fecha no existe en el calendario");
 
 // --- FILTROS DEL HISTORIAL: MEDIO DE PAGO ---
 

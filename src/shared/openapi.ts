@@ -12,6 +12,11 @@ import {
   MOTIVO_CAMBIO_LONGITUD_MAXIMA,
   registrarCambioSchema,
 } from "../modules/cambios-mercaderia/cambios-mercaderia.schemas.js";
+import {
+  consultarCuentasCorrientesSchema,
+  consultarEstadoCuentaSchema,
+  TEXTO_BUSQUEDA_LONGITUD_MAXIMA as TEXTO_CUENTAS_CORRIENTES_LONGITUD_MAXIMA,
+} from "../modules/cuentas-corrientes/cuentas-corrientes.schemas.js";
 import { CODIGOS_ERROR_DEUDOR } from "../modules/deudores/deudores.errors.js";
 import {
   actualizarDeudorParametrosSchema,
@@ -180,6 +185,20 @@ const deudorResumido = {
   required: ["idDeudor", "nombreCompleto"],
 };
 
+/**
+ * Fecha estimada de pago de un fiado (ver `fechaEstimadaPago` de `RegistrarVentaResponse`, `VentaConsultada` y `FiadoDeEstadoCuenta`).
+ * Se declara antes de las respuestas que la usan porque se evalúa al cargar el módulo.
+ */
+const fechaEstimadaPago = {
+  type: "string",
+  format: "date",
+  nullable: true,
+  example: "2026-12-15",
+  description:
+    "Fecha (`AAAA-MM-DD`, sin hora) en que el deudor prometió pagar el fiado. Solo informativa: no bloquea ni modifica cobros, saldo ni estados. " +
+    "Nula en contado y en fiados sin fecha",
+};
+
 /** Respuesta exitosa de `POST /api/ventas` (ver `RegistrarVentaResponse`). */
 const ventaRegistrada = {
   type: "object",
@@ -229,9 +248,13 @@ const ventaRegistrada = {
           nullable: true,
           description: "Deudor del fiado, con sus cuatro datos. Nulo en una venta de contado",
         },
+        fechaEstimadaPago: {
+          ...fechaEstimadaPago,
+          description: `${fechaEstimadaPago.description}. Es la fecha que quedó guardada (releída de la base)`,
+        },
       },
       // numeroComprobante nunca es nulo: se emite siempre, incluso en un fiado
-      required: ["idVenta", "numeroComprobante", "montoTotal", "estado", "fechaHora", "pagos", "deudor"],
+      required: ["idVenta", "numeroComprobante", "montoTotal", "estado", "fechaHora", "pagos", "deudor", "fechaEstimadaPago"],
     },
   },
 };
@@ -428,6 +451,10 @@ const ventaConsultada = {
             "Deudor de la venta con sus cuatro datos. Nulo en una venta de contado y en las anteriores al vínculo con deudores " +
             "(que conservan su `clienteReferencia`)",
         },
+        fechaEstimadaPago: {
+          ...fechaEstimadaPago,
+          description: `${fechaEstimadaPago.description}. Se devuelve tal como se guardó, sea cual sea el estado actual de la venta`,
+        },
         vendedor: {
           type: "object",
           properties: {
@@ -532,6 +559,7 @@ const ventaConsultada = {
         "modalidadEntrega",
         "clienteReferencia",
         "deudor",
+        "fechaEstimadaPago",
         "vendedor",
         "subtotalBruto",
         "descuentoManual",
@@ -1516,6 +1544,170 @@ const parametroIdDeudor = {
   schema: (esquemaActualizacionDeudorParametros.properties ?? {}).idDeudor,
 };
 
+// --- CUENTAS CORRIENTES (subárea de Ventas) ---
+
+/** Un deudor en el listado de cuentas corrientes (ver `CuentaCorrienteListada`). Los importes van como texto con 2 decimales. */
+const cuentaCorrienteListada = {
+  type: "object",
+  properties: {
+    idDeudor: { type: "integer", example: 1 },
+    nombreCompleto: { type: "string", example: "Prueba Uno" },
+    dni: { type: "string", example: "99000001" },
+    saldo: {
+      type: "string",
+      example: "4500.00",
+      description: "Lo que el deudor debe hoy: suma de lo que falta pagar de sus fiados pendientes (`0.00` si no tiene ninguno)",
+    },
+    cantidadFiadosPendientes: { type: "integer", example: 2, description: "Cantidad de fiados `PENDIENTE_PAGO` del deudor" },
+  },
+  required: ["idDeudor", "nombreCompleto", "dni", "saldo", "cantidadFiadosPendientes"],
+};
+
+/** Respuesta exitosa de `GET /api/cuentas-corrientes` (ver `ConsultarCuentasCorrientesResponse`). */
+const cuentasCorrientesConsultadas = {
+  type: "object",
+  properties: {
+    exito: { type: "boolean", example: true },
+    cuentasCorrientes: { type: "array", items: cuentaCorrienteListada },
+    paginacion: {
+      type: "object",
+      properties: {
+        pagina: { type: "integer", example: 1 },
+        cantidadPorPagina: { type: "integer", example: 20 },
+        totalRegistros: { type: "integer", example: 1 },
+        totalPaginas: { type: "integer", example: 1 },
+      },
+      required: ["pagina", "cantidadPorPagina", "totalRegistros", "totalPaginas"],
+    },
+  },
+  required: ["exito", "cuentasCorrientes", "paginacion"],
+};
+
+/** Descripción de cada parámetro del listado (los rangos salen de las mismas constantes del esquema). */
+const descripcionesParametrosCuentasCorrientes: Record<string, string> = {
+  pagina: `Número de página, entero entre 1 y ${PAGINA_MAXIMA}. Por defecto 1.`,
+  cantidadPorPagina: `Filas por página, entero entre 1 y ${CANTIDAD_POR_PAGINA_MAXIMA}. Por defecto ${CANTIDAD_POR_PAGINA_PREDETERMINADA}.`,
+  texto:
+    `Texto contenido en el nombre completo o en el DNI (máximo ${TEXTO_CUENTAS_CORRIENTES_LONGITUD_MAXIMA} caracteres), sin distinguir mayúsculas. ` +
+    "Se recortan los espacios de los extremos. Coincidencia parcial, no exacta. Vacío o ausente equivale a no filtrar. " +
+    "A diferencia de `textoCliente` del historial, `%` y `_` se buscan como caracteres literales (no son comodines). Distingue tildes.",
+  incluirSinDeuda:
+    "`true` o `false` (en minúsculas; cualquier otro valor da 400). Por defecto `false`: solo se listan los deudores con saldo mayor a 0. " +
+    "Con `true` se suman los que no deben (saldo `0.00`).",
+};
+
+// Los parámetros se derivan del esquema Zod real, igual que los del historial, para que no se desactualicen
+const esquemaConsultaCuentasCorrientes = z.toJSONSchema(consultarCuentasCorrientesSchema, { io: "input", target: "draft-7" });
+const parametrosCuentasCorrientes = Object.entries(esquemaConsultaCuentasCorrientes.properties ?? {}).map(([nombre, esquema]) => ({
+  name: nombre,
+  in: "query",
+  required: false,
+  description: descripcionesParametrosCuentasCorrientes[nombre],
+  // El booleano llega como texto: Zod describe la entrada con un valor por defecto booleano, que en la query no es cierto
+  schema: nombre === "incluirSinDeuda" ? { type: "string", enum: ["true", "false"], default: "false" } : esquema,
+}));
+
+// El parámetro de ruta también se deriva del esquema Zod real
+const esquemaConsultaEstadoCuenta = z.toJSONSchema(consultarEstadoCuentaSchema, { io: "input", target: "draft-7" });
+const parametroIdDeudorEstadoCuenta = {
+  name: "idDeudor",
+  in: "path",
+  required: true,
+  description: `Id del deudor: entero positivo (máximo ${ID_DEUDOR_MAXIMO}), por ejemplo el que devuelve el listado de cuentas corrientes.`,
+  schema: (esquemaConsultaEstadoCuenta.properties ?? {}).idDeudor,
+};
+
+/** Un fiado pendiente en el estado de cuenta (ver `FiadoDeEstadoCuenta`). Los importes van como texto con 2 decimales. */
+const fiadoDeEstadoCuenta = {
+  type: "object",
+  properties: {
+    idVenta: { type: "integer", example: 10 },
+    numeroComprobante: {
+      type: "string",
+      nullable: true,
+      example: "CMP-00000010",
+      description: "Ticket de deuda del fiado. Nulo solo en datos muy anteriores",
+    },
+    fechaHora: { type: "string", format: "date-time", description: "Instante de la venta (ISO 8601)" },
+    fechaEstimadaPago,
+    vencido: {
+      type: "boolean",
+      example: false,
+      description:
+        "`true` si tiene `fechaEstimadaPago`, esa fecha es anterior a hoy (hora de Argentina; hoy no cuenta) y todavía falta pagar algo. " +
+        "Se calcula al consultar, no se guarda. Es solo informativo",
+    },
+    importeAdeudado: { type: "string", example: "1500.00", description: "Subtotal bruto menos descuento manual de la venta" },
+    yaPagado: { type: "string", example: "0.00", description: "Suma de lo cobrado hasta ahora de este fiado" },
+    falta: { type: "string", example: "1500.00", description: "`importeAdeudado - yaPagado`" },
+  },
+  required: ["idVenta", "numeroComprobante", "fechaHora", "fechaEstimadaPago", "vencido", "importeAdeudado", "yaPagado", "falta"],
+};
+
+/** Respuesta exitosa de `GET /api/cuentas-corrientes/{idDeudor}` (ver `EstadoCuentaResponse`). */
+const estadoCuentaConsultado = {
+  type: "object",
+  properties: {
+    exito: { type: "boolean", example: true },
+    deudor,
+    saldo: {
+      type: "string",
+      example: "1500.00",
+      description: "Suma de los `falta` de `fiados`, calculada a partir de esas mismas filas (`0.00` si no hay fiados pendientes)",
+    },
+    fiados: {
+      type: "array",
+      description: "Fiados pendientes del deudor, del más viejo al más nuevo (`fechaHora` ascendente, desempate por `idVenta`). Vacío si no debe nada",
+      items: fiadoDeEstadoCuenta,
+    },
+  },
+  required: ["exito", "deudor", "saldo", "fiados"],
+};
+
+/** Error de validación (400) del id de ruta del estado de cuenta: mismo formato que el resto, con el mensaje propio de la ruta. */
+const errorValidacionEstadoCuenta = {
+  ...errorValidacion,
+  properties: {
+    ...errorValidacion.properties,
+    mensaje: { type: "string", example: "Parámetros de ruta inválidos" },
+    errores: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          campo: { type: "string", example: "idDeudor" },
+          mensaje: { type: "string", example: "Debe ser un entero sin signo, sin espacios ni notación científica" },
+        },
+      },
+    },
+  },
+};
+
+// --- CUERPO DEL ALTA DE VENTA ---
+
+const esquemaAltaVenta = z.toJSONSchema(registrarVentaSchema, { io: "input", target: "draft-7" });
+/**
+ * Body de `POST /api/ventas`, derivado del esquema Zod. Zod describe `fechaEstimadaPago` (opcional y nula) con un `anyOf`
+ * que incluye `type: "null"`, que OpenAPI 3.0.3 no admite: se reescribe con `nullable`.
+ */
+const cuerpoAltaVenta = {
+  ...esquemaAltaVenta,
+  properties: {
+    ...(esquemaAltaVenta.properties ?? {}),
+    fechaEstimadaPago: {
+      type: "string",
+      format: "date",
+      pattern: "^\\d{4}-\\d{2}-\\d{2}$",
+      nullable: true,
+      example: "2026-12-15",
+      description:
+        "Opcional; nula u omitida equivale a \"sin fecha\". Fecha `AAAA-MM-DD` (que exista en el calendario) en que el deudor promete pagar. " +
+        "Solo en un fiado (`pagos` vacío): en contado con fecha no nula es 400. No puede ser anterior a hoy en hora de Argentina (hoy sí vale): 400. " +
+        "Se guarda tal cual, sin hora. Es solo informativa",
+    },
+  },
+};
+
 // --- DOCUMENTO OPENAPI ---
 
 /**
@@ -1675,6 +1867,9 @@ export const openapiDocument = {
           "Con `pagos` vacío la venta queda `PENDIENTE_PAGO` (fiado) y exige `idDeudor` (400 si falta). " +
           "En una venta de contado (`pagos` no vacío) `idDeudor` no se admite (400). Un deudor inexistente da 404 con `codigo` `DEUDOR_NO_ENCONTRADO`, " +
           "sin descontar stock ni crear nada. La respuesta trae `deudor` con sus cuatro datos, o `null` en contado. " +
+          "`fechaEstimadaPago` (`AAAA-MM-DD`) es opcional, solo informativa y solo se admite en un fiado: nula u omitida equivale a \"sin fecha\", " +
+          "en contado con fecha no nula es 400, una fecha anterior a hoy en hora de Argentina es 400 (hoy sí vale) y con formato inválido o inexistente (`2026-13-45`) es 400; " +
+          "se guarda sin hora y la respuesta la devuelve tal como quedó guardada (`null` si no hay). " +
           "`clienteReferencia` ya no forma parte del contrato: si llega se descarta sin error y no se guarda. " +
           "Descuenta stock y congela precio y costo de cada ítem. Los cobros se asocian a la última caja abierta. " +
           "Toda venta, cobrada o fiado, devuelve su `numeroComprobante` (ticket de pago o ticket de deuda). " +
@@ -1687,8 +1882,8 @@ export const openapiDocument = {
           required: true,
           content: {
             "application/json": {
-              // `io: "input"` describe lo que el cliente envía, no el resultado ya transformado
-              schema: z.toJSONSchema(registrarVentaSchema, { io: "input", target: "draft-7" }),
+              // Derivado de Zod con `io: "input"` (lo que el cliente envía, no el resultado ya transformado); ver `cuerpoAltaVenta`
+              schema: cuerpoAltaVenta,
             },
           },
         },
@@ -1700,7 +1895,7 @@ export const openapiDocument = {
           "400": {
             description:
               "Body inválido o regla de negocio incumplida (stock, montos, producto inactivo, descuento sin motivo o motivo sin descuento, " +
-              "fiado sin `idDeudor`, venta de contado con `idDeudor`, " +
+              "fiado sin `idDeudor`, venta de contado con `idDeudor` o con `fechaEstimadaPago` no nula, `fechaEstimadaPago` con formato inválido o anterior a hoy, " +
               "`montoRecibido` menor al monto final o en un medio que no es efectivo)",
             content: {
               "application/json": { schema: { oneOf: [errorValidacion, errorNegocio] } },
@@ -2171,6 +2366,63 @@ export const openapiDocument = {
           "409": {
             description: "El DNI ya pertenece a otro deudor (`DNI_DUPLICADO`); `deudorExistente` trae sus datos",
             content: { "application/json": { schema: dniDuplicado } },
+          },
+          ...respuestasProteccion,
+        },
+      },
+    },
+    "/api/cuentas-corrientes": {
+      get: {
+        tags: ["Ventas"],
+        security: [{ bearerAuth: [] }],
+        summary: "Listar deudores con su saldo (paginado)",
+        description:
+          "Cuenta corriente de los deudores: por cada uno, lo que debe hoy y cuántos fiados pendientes tiene. " +
+          "El saldo no se guarda: es la suma de lo que falta pagar (importe adeudado menos lo ya abonado) de sus fiados `PENDIENTE_PAGO`; " +
+          "las ventas `COMPLETADA` y `ANULADA` no cuentan. Por defecto solo salen los deudores con saldo mayor a 0; `incluirSinDeuda=true` suma los de saldo 0. " +
+          "**Orden fijo:** saldo descendente, desempate por nombre completo ascendente y luego por id ascendente " +
+          "(el orden alfabético depende de la intercalación de la base). `texto` busca por nombre completo (parcial, sin distinguir mayúsculas) o por DNI. " +
+          "Una página fuera de rango devuelve 200 con lista vacía y el `totalRegistros` real. La lista y el total salen de la misma foto de la base. " +
+          "Solo lectura. Requiere sesión; pueden usarlo los tres roles (VENDEDOR, GESTOR_COMERCIAL y GERENTE) y no exige caja abierta.",
+        parameters: parametrosCuentasCorrientes,
+        responses: {
+          "200": {
+            description: "Página de deudores con su saldo y los metadatos de paginación",
+            content: { "application/json": { schema: cuentasCorrientesConsultadas } },
+          },
+          "400": {
+            description: "Parámetros de consulta inválidos (formato, rango, `texto` de más de 100 caracteres o `incluirSinDeuda` distinto de `true` o `false`)",
+            content: { "application/json": { schema: errorValidacionConsulta } },
+          },
+          ...respuestasProteccion,
+        },
+      },
+    },
+    "/api/cuentas-corrientes/{idDeudor}": {
+      get: {
+        tags: ["Ventas"],
+        security: [{ bearerAuth: [] }],
+        summary: "Estado de cuenta de un deudor",
+        description:
+          "Los fiados pendientes del deudor con, por cada uno, el importe adeudado (subtotal bruto menos descuento manual), lo ya pagado y lo que falta, " +
+          "y el saldo del deudor: la suma de los `falta` de esas mismas filas. Sin paginar; del fiado más viejo al más nuevo (`fechaHora` ascendente, desempate por `idVenta`). " +
+          "Un deudor sin fiados pendientes devuelve 200 con saldo `0.00` y `fiados` vacío. " +
+          "Cada fiado trae `fechaEstimadaPago` (`AAAA-MM-DD` o `null`) y `vencido`, calculado al consultar (no se guarda): " +
+          "`true` si tiene fecha, es anterior a hoy en hora de Argentina y todavía falta pagar algo. La fecha es solo informativa y no cambia el saldo ni el orden. " +
+          "Solo lectura. Requiere sesión; pueden usarlo los tres roles (VENDEDOR, GESTOR_COMERCIAL y GERENTE) y no exige caja abierta.",
+        parameters: [parametroIdDeudorEstadoCuenta],
+        responses: {
+          "200": {
+            description: "Estado de cuenta del deudor",
+            content: { "application/json": { schema: estadoCuentaConsultado } },
+          },
+          "400": {
+            description: "`idDeudor` inválido (no es un entero positivo)",
+            content: { "application/json": { schema: errorValidacionEstadoCuenta } },
+          },
+          "404": {
+            description: "El deudor no existe (`DEUDOR_NO_ENCONTRADO`)",
+            content: { "application/json": { schema: deudorInexistente } },
           },
           ...respuestasProteccion,
         },

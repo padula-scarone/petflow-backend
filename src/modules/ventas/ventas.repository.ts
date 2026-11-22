@@ -1,4 +1,5 @@
 import type { Prisma } from "../../generated/prisma/client.js";
+import { fechaCalendarioATexto, textoAFechaCalendario } from "../../shared/fecha-calendario.js";
 import { prisma } from "../../shared/prisma.js";
 import { construirCondicionCambiosActivos } from "../cambios-mercaderia/cambios-mercaderia.repository.js";
 import type { Deudor } from "../deudores/deudores.types.js";
@@ -63,6 +64,8 @@ export type VentaPersistida = {
   pagos: PagoCobroCalculado[];
   /** Deudor leído al registrar (el de `idDeudor`); nulo en una venta de contado. */
   deudor: Deudor | null;
+  /** Fecha estimada de pago (`AAAA-MM-DD`) releída de la base al guardar; nula en contado y en un fiado sin fecha. */
+  fechaEstimadaPago: string | null;
 };
 
 /** Función de cálculo que inyecta el service; recibe lo leído de la BD (incluido el deudor, si lo hay) y devuelve los totales. */
@@ -190,6 +193,8 @@ export async function registrarVentaAtomica(
         estado: calculo.estado,
         // `clienteReferencia` ya no se escribe: queda nulo. El deudor es nulo en contado (el esquema no lo admite ahí)
         idDeudor: input.idDeudor ?? null,
+        // Columna date: se escribe como medianoche UTC para que no corra un día. Nula si se omitió o vino nula
+        fechaEstimadaPago: textoAFechaCalendario(input.fechaEstimadaPago),
         subtotalBruto: centavosAString(calculo.subtotalBrutoCentavos),
         descuentoManual: centavosAString(calculo.descuentoManualCentavos),
         // El esquema Zod garantiza que existe si y solo si hay descuento
@@ -219,7 +224,7 @@ export async function registrarVentaAtomica(
           })),
         },
       },
-      select: { idVenta: true, fechaHora: true },
+      select: { idVenta: true, fechaHora: true, fechaEstimadaPago: true },
     });
 
     // Toda venta emite comprobante al instante (ticket de pago o ticket de deuda).
@@ -239,6 +244,8 @@ export async function registrarVentaAtomica(
       fechaHora: venta.fechaHora,
       pagos: calculo.pagos,
       deudor,
+      // La fecha que devolvió la base, no la del body: así el 201 prueba que no hubo corrimiento de día
+      fechaEstimadaPago: fechaCalendarioATexto(venta.fechaEstimadaPago),
     };
   });
 }
@@ -658,6 +665,7 @@ export async function buscarVentaPorId(idVenta: number): Promise<VentaDetallada 
       clienteReferencia: true,
       // En el mismo select de la venta (sin consulta aparte); nulo en contado y en ventas anteriores al vínculo
       deudor: { select: SELECCION_DEUDOR_COMPLETO },
+      fechaEstimadaPago: true,
       subtotalBruto: true,
       descuentoManual: true,
       motivoDescuento: true,
@@ -719,6 +727,7 @@ export async function buscarVentaPorId(idVenta: number): Promise<VentaDetallada 
     modalidadEntrega: venta.modalidadEntrega,
     clienteReferencia: venta.clienteReferencia,
     deudor: venta.deudor,
+    fechaEstimadaPago: fechaCalendarioATexto(venta.fechaEstimadaPago),
     vendedor: { idUsuario: venta.usuario.idUsuario, nombre: venta.usuario.nombre },
     subtotalBrutoCentavos: aCentavos(venta.subtotalBruto),
     descuentoManualCentavos: aCentavos(venta.descuentoManual),
