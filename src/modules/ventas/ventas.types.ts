@@ -125,6 +125,8 @@ export type RegistrarVentaResponse = {
     pagos: PagoCobrado[];
     /** Deudor del fiado, con sus cuatro datos. Nulo en una venta de contado. */
     deudor: Deudor | null;
+    /** Fecha estimada de pago del fiado (`AAAA-MM-DD`, sin hora), tal como quedó guardada. Nula en contado y en fiados sin fecha. */
+    fechaEstimadaPago: string | null;
   };
 };
 
@@ -300,6 +302,8 @@ export type VentaDetallada = {
   clienteReferencia: string | null;
   /** Deudor de la venta con sus cuatro datos, o `null` si es de contado o anterior al vínculo con deudores. */
   deudor: Deudor | null;
+  /** Fecha estimada de pago (`AAAA-MM-DD`, sin hora) ya convertida a texto por el repositorio; nula si no tiene. */
+  fechaEstimadaPago: string | null;
   vendedor: VendedorVenta;
   subtotalBrutoCentavos: number;
   descuentoManualCentavos: number;
@@ -364,6 +368,11 @@ export type VentaConsultada = {
   clienteReferencia: string | null;
   /** Deudor de la venta con sus cuatro datos, o `null` si es de contado o anterior al vínculo con deudores. */
   deudor: Deudor | null;
+  /**
+   * Fecha estimada de pago del fiado (`AAAA-MM-DD`, sin hora), o `null` si no tiene (contado, fiado sin fecha o venta anterior).
+   * Es solo informativa y se devuelve tal como se guardó, sea cual sea el estado actual de la venta.
+   */
+  fechaEstimadaPago: string | null;
   vendedor: VendedorVenta;
   /** Montos como texto con 2 decimales. */
   subtotalBruto: string;
