@@ -1,8 +1,6 @@
 import type { Request, Response } from "express";
 import type { SesionAutenticada } from "../auth/auth.types.js";
-// Deuda técnica: importación entre módulos (deudores ya importa de ventas); la guarda debería vivir en `shared`
-import { esErrorNegocioDeudor } from "../deudores/deudores.errors.js";
-import { esErrorNegocio } from "./ventas.errors.js";
+import { esErrorNegocio, esErrorNegocioConCodigo } from "./ventas.errors.js";
 import {
   anularVentaCuerpoSchema,
   anularVentaParametrosSchema,
@@ -40,13 +38,14 @@ function construirRespuestaValidacion(mensaje: string, incidencias: ReadonlyArra
 }
 
 /**
- * Responde un error de negocio del alta de venta con su código HTTP y su mensaje.
- * Solo el error de un deudor inexistente suma `codigo` (`DEUDOR_NO_ENCONTRADO`); todos los demás mantienen
+ * Responde un error de negocio con su código HTTP y su mensaje.
+ * Solo los errores que traen `codigo` lo suman: el de un deudor inexistente (`DEUDOR_NO_ENCONTRADO`, en el alta)
+ * y el de un fiado con cobros (`FIADO_CON_COBROS`, en Liquidar Fiado y en la anulación). Todos los demás mantienen
  * el formato de siempre `{ exito: false, mensaje }`, sin `codigo`.
  * @returns `true` si el valor era un error de negocio y ya se respondió; `false` si hay que relanzarlo.
  */
 function responderErrorNegocio(res: Response, errorCapturado: unknown): boolean {
-  if (esErrorNegocioDeudor(errorCapturado)) {
+  if (esErrorNegocioConCodigo(errorCapturado)) {
     res.status(errorCapturado.status).json({
       exito: false,
       mensaje: errorCapturado.mensaje,
@@ -155,7 +154,8 @@ export async function getConsultarVenta(req: Request, res: Response): Promise<vo
  * Valida el parámetro de ruta y el body, y delega en el service. No contiene reglas de negocio.
  * La sesión y el rol los exige `requerirRol` en la ruta, no este handler.
  * Respuestas: 200 si se cobra; 400 con detalle por campo si los datos son inválidos o falla una regla de negocio;
- * 404 si la venta no existe; 409 si no está pendiente de pago, no hay caja abierta o hubo un doble cobro.
+ * 404 si la venta no existe; 409 si no está pendiente de pago, no hay caja abierta, hubo un doble cobro o el fiado ya tiene
+ * cobros parciales (este último con `codigo` `FIADO_CON_COBROS`).
  */
 export async function postLiquidarFiado(req: Request, res: Response): Promise<void> {
   // El parámetro de ruta llega como texto: el esquema lo convierte de forma estricta
@@ -175,9 +175,9 @@ export async function postLiquidarFiado(req: Request, res: Response): Promise<vo
     const resultado = await liquidarFiado({ ...parseoParametros.data, ...parseoCuerpo.data });
     res.status(200).json(resultado);
   } catch (errorCapturado) {
-    // Igual que en los otros handlers: los errores de negocio se traducen y cualquier otro valor sube a Express
-    if (esErrorNegocio(errorCapturado)) {
-      res.status(errorCapturado.status).json({ exito: false, mensaje: errorCapturado.mensaje });
+    // Igual que en los otros handlers: los errores de negocio se traducen (el de un fiado con cobros suma `codigo`)
+    // y cualquier otro valor sube a Express
+    if (responderErrorNegocio(res, errorCapturado)) {
       return;
     }
     throw errorCapturado;
@@ -190,7 +190,8 @@ export async function postLiquidarFiado(req: Request, res: Response): Promise<vo
  * La sesión y el rol los exige `requerirRol` en la ruta, no este handler.
  * Quien anula es el usuario del token (`res.locals.sesion`); un `idUsuario` en el body se ignora.
  * Respuestas: 200 si se anula; 400 con detalle por campo si `idVenta` o el motivo son inválidos; 403 si venció la ventana de tiempo;
- * 404 si la venta no existe; 409 si ya está anulada, cambió de estado durante el proceso o tuvo cobro y no hay caja abierta.
+ * 404 si la venta no existe; 409 si ya está anulada, tiene cobros de deudor (`codigo` `FIADO_CON_COBROS`),
+ * cambió de estado durante el proceso o tuvo cobro y no hay caja abierta.
  */
 export async function postAnularVenta(req: Request, res: Response): Promise<void> {
   // El parámetro de ruta llega como texto: el esquema lo convierte de forma estricta
@@ -216,9 +217,8 @@ export async function postAnularVenta(req: Request, res: Response): Promise<void
     res.status(200).json(resultado);
   } catch (errorCapturado) {
     // Igual que en los otros handlers: los errores de negocio se traducen (incluido el 403 de ventana vencida)
-    // y cualquier otro valor sube a Express
-    if (esErrorNegocio(errorCapturado)) {
-      res.status(errorCapturado.status).json({ exito: false, mensaje: errorCapturado.mensaje });
+    // y cualquier otro valor sube a Express. El 409 de un fiado con cobros suma `codigo`
+    if (responderErrorNegocio(res, errorCapturado)) {
       return;
     }
     throw errorCapturado;

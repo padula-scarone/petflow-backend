@@ -417,6 +417,8 @@ export type VentaAdeudada = {
   estado: EstadoVentaHistorial;
   subtotalBrutoCentavos: number;
   descuentoManualCentavos: number;
+  /** `true` si la venta tiene al menos un cobro en `detalles_cobro_deudor`: ya no se puede liquidar por completo. */
+  tieneCobros: boolean;
 };
 
 // --- COBRO DE FIADO: RESULTADO DEL CÁLCULO ---
@@ -515,6 +517,8 @@ export type VentaAnulable = {
   fechaHora: Date;
   /** Origen de la ventana si existe: nulo mientras el fiado no se cobra. */
   fechaHoraPago: Date | null;
+  /** `true` si la venta tiene al menos un cobro en `detalles_cobro_deudor`, sin importar su estado: no se puede anular. */
+  tieneCobros: boolean;
 };
 
 /** Resultado de `evaluarAnulacion`: la venta se puede anular y estos son los datos para transicionarla. */

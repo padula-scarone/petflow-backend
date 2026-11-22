@@ -97,6 +97,35 @@ export function crearErrorAnulacionSimultanea(idVenta: number): ErrorNegocio {
   return crearErrorNegocio(`La venta ${idVenta} cambió de estado o venció el plazo mientras se procesaba`, 409);
 }
 
+// --- ERRORES CON CODIGO LEGIBLE POR MAQUINA ---
+
+/**
+ * Error de negocio con un `codigo` legible por maquina. Lo comparten los modulos que lo agregan
+ * (deudores, cuentas corrientes y los 409 de cobros de ventas): el controller solo necesita saber que trae `codigo`.
+ */
+export type ErrorNegocioConCodigo = ErrorNegocio & { codigo: string };
+
+/** Codigo de los 409 de Liquidar Fiado y de la anulacion (baja y edicion) sobre un fiado que ya tiene cobros. */
+export const CODIGO_FIADO_CON_COBROS = "FIADO_CON_COBROS" as const;
+
+/**
+ * Crea el error de operar sobre un fiado que ya tiene al menos un cobro registrado (parcial o total).
+ * Usa 409 porque el pedido es valido pero choca con el estado actual del fiado: cobrarlo por completo o anularlo
+ * desconoceria lo que ya se cobro y su ingreso en caja. Es independiente del estado de la venta
+ * (un fiado completado por cobros tambien los tiene).
+ * @param idVenta Id del fiado con cobros.
+ * @param accionRechazada Lo que se intento hacer, para que el mensaje sea claro ("cobrar por completo" o "anular o modificar").
+ */
+export function crearErrorFiadoConCobros(idVenta: number, accionRechazada: string): ErrorNegocioConCodigo {
+  return {
+    ...crearErrorNegocio(
+      `El fiado ${idVenta} ya tiene cobros registrados: no se puede ${accionRechazada}`,
+      409,
+    ),
+    codigo: CODIGO_FIADO_CON_COBROS,
+  };
+}
+
 // --- GUARDA DE TIPO ---
 
 /**
@@ -114,4 +143,12 @@ export function esErrorNegocio(valor: unknown): valor is ErrorNegocio {
     typeof candidato.mensaje === "string" &&
     (candidato.status === 400 || candidato.status === 403 || candidato.status === 404 || candidato.status === 409)
   );
+}
+
+/**
+ * Indica si un valor capturado es un error de negocio que ademas trae `codigo` (texto).
+ * Es mas estricta que `esErrorNegocio`: un error sin codigo no pasa.
+ */
+export function esErrorNegocioConCodigo(valor: unknown): valor is ErrorNegocioConCodigo {
+  return esErrorNegocio(valor) && typeof (valor as { codigo?: unknown }).codigo === "string";
 }

@@ -12,7 +12,7 @@ const ID_ENTERO_MAXIMO = 2_147_483_647;
  * Crea un validador que acepta hasta `decimales` posiciones decimales.
  * Se compara contra un margen mínimo porque los números de JS no representan decimales exactos.
  */
-function conDecimalesMaximos(decimales: number) {
+export function conDecimalesMaximos(decimales: number) {
   const factor = 10 ** decimales;
   return (valor: number) => Math.abs(Math.round(valor * factor) - valor * factor) < 1e-6;
 }
@@ -20,9 +20,9 @@ function conDecimalesMaximos(decimales: number) {
 /**
  * Reporta como error cada repetición posterior a la primera aparición de un medio de pago.
  * La BD tiene unique (id_venta, id_medio_pago): un medio solo puede aparecer una vez por venta.
- * Es compartida por el alta de venta y por el cobro de un fiado.
+ * Es compartida por el alta de venta, por el cobro de un fiado y por el cobro de fiados de un deudor (cuentas-corrientes).
  */
-function validarMediosNoRepetidos(pagos: ReadonlyArray<{ idMedioPago: number }>, contexto: z.RefinementCtx): void {
+export function validarMediosNoRepetidos(pagos: ReadonlyArray<{ idMedioPago: number }>, contexto: z.RefinementCtx): void {
   pagos.forEach((pago, index) => {
     const repetido = pagos.findIndex((otro) => otro.idMedioPago === pago.idMedioPago);
     if (repetido !== index) {
@@ -69,10 +69,10 @@ export const MONTO_RECIBIDO_MAXIMO = 9_999_999_999.99;
 export const MOTIVO_DESCUENTO_LONGITUD_MAXIMA = 200;
 
 /**
- * Un pago con el monto recibido opcional. Lo comparten el alta de venta y el cobro de un fiado.
+ * Un pago con el monto recibido opcional. Lo comparten el alta de venta, el cobro de un fiado y el cobro de fiados de un deudor.
  * `montoRecibido` solo corresponde a un medio en efectivo, pero eso lo valida el service (el esquema no conoce el tipo del medio).
  */
-const pagoConMontoRecibidoSchema = pagoVentaSchema.extend({
+export const pagoConMontoRecibidoSchema = pagoVentaSchema.extend({
   montoRecibido: z
     .number()
     .positive()
