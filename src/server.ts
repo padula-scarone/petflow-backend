@@ -4,6 +4,7 @@ import swaggerUi from "swagger-ui-express";
 import { authRouter } from "./modules/auth/auth.routes.js";
 import { cajaRouter } from "./modules/caja/caja.routes.js";
 import { cambiosMercaderiaRouter } from "./modules/cambios-mercaderia/cambios-mercaderia.routes.js";
+import { cuentasCorrientesRouter } from "./modules/cuentas-corrientes/cuentas-corrientes.routes.js";
 import { deudoresRouter } from "./modules/deudores/deudores.routes.js";
 import { inventarioRouter } from "./modules/inventario/inventario.routes.js";
 import { ventasRouter } from "./modules/ventas/ventas.routes.js";
@@ -40,6 +41,7 @@ app.use("/api/auth", authRouter);
 app.use("/api/ventas", ventasRouter);
 app.use("/api/cambios-mercaderia", cambiosMercaderiaRouter);
 app.use("/api/deudores", deudoresRouter);
+app.use("/api/cuentas-corrientes", cuentasCorrientesRouter);
 app.use("/api/productos", inventarioRouter);
 app.use("/api/medios-pago", cajaRouter);
 
