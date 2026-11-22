@@ -7,6 +7,7 @@ import type { DecimalExacto } from "../inventario/inventario.types.js";
 import {
   crearErrorAnulacionSimultanea,
   crearErrorDobleCobro,
+  crearErrorFiadoConCobros,
   crearErrorNegocio,
   crearErrorStockInsuficiente,
 } from "./ventas.errors.js";
@@ -261,8 +262,9 @@ export async function registrarVentaAtomica(
  * @param input Parámetro de ruta y body validados.
  * @param calcular Cálculo de negocio, ejecutado dentro de la transacción con datos recién leídos.
  * @returns Los datos del cobro persistido.
- * @throws {ErrorNegocio} Las del cálculo (404/409/400), no hay caja abierta (409) o
- * otro cobro cambió el estado de la venta antes de este (409). Se lanza como objeto puro, no como Error.
+ * @throws {ErrorNegocio} Las del cálculo (404/409/400), no hay caja abierta (409), otro cobro cambió el estado de la venta
+ * antes de este (409) o un cobro parcial del deudor se confirmó antes de este (409 `FIADO_CON_COBROS`, detectado tras el bloqueo
+ * con un `count` de `detalles_cobro_deudor`). Se lanza como objeto puro, no como Error.
  */
 export async function liquidarFiadoAtomico(
   input: LiquidarFiadoInput,
@@ -272,7 +274,15 @@ export async function liquidarFiadoAtomico(
     // --- LECTURA Y CÁLCULO ---
     const ventaLeida = await tx.venta.findUnique({
       where: { idVenta: input.idVenta },
-      select: { idVenta: true, numeroComprobante: true, estado: true, subtotalBruto: true, descuentoManual: true },
+      select: {
+        idVenta: true,
+        numeroComprobante: true,
+        estado: true,
+        subtotalBruto: true,
+        descuentoManual: true,
+        // Cuantos cobros tiene: el service rechaza (409) un fiado ya cobrado parcialmente, en el mismo select (sin consulta aparte)
+        _count: { select: { detallesCobroDeudor: true } },
+      },
     });
     const medios = await tx.medioPago.findMany({
       where: { idMedioPago: { in: input.pagos.map((pago) => pago.idMedioPago) } },
@@ -288,6 +298,7 @@ export async function liquidarFiadoAtomico(
             estado: ventaLeida.estado,
             subtotalBrutoCentavos: aCentavos(ventaLeida.subtotalBruto),
             descuentoManualCentavos: aCentavos(ventaLeida.descuentoManual),
+            tieneCobros: ventaLeida._count.detallesCobroDeudor > 0,
           },
       medios.map((medio) => ({
         idMedioPago: medio.idMedioPago,
@@ -324,6 +335,16 @@ export async function liquidarFiadoAtomico(
     });
     if (actualizadas.count !== 1) {
       throw crearErrorDobleCobro(input.idVenta);
+    }
+
+    // --- RECHEQUEO DE COBROS PARCIALES ---
+    // El updateMany ya tiene la fila bloqueada. Un cobro parcial de un deudor NO modifica la fila de la venta (solo inserta
+    // en detalles_cobro_deudor), asi que el where por estado no lo ve: si uno se confirmo entre la lectura y este punto,
+    // el fiado sigue PENDIENTE_PAGO y el updateMany pasaria. Este count (una sentencia nueva en READ COMMITTED) si lo ve,
+    // y el rollback deshace el cambio de estado.
+    const cobrosRegistrados = await tx.detalleCobroDeudor.count({ where: { idVenta: input.idVenta } });
+    if (cobrosRegistrados > 0) {
+      throw crearErrorFiadoConCobros(input.idVenta, "cobrar por completo");
     }
 
     // --- GUARDADO DE LOS PAGOS ---
@@ -365,8 +386,9 @@ export async function liquidarFiadoAtomico(
  * @param input Parámetro de ruta, motivo validado y usuario del token.
  * @param evaluar Evaluación de negocio, ejecutada dentro de la transacción con datos recién leídos.
  * @returns Los datos de la anulación persistida.
- * @throws {ErrorNegocio} Las de la evaluación (404/409/403/409) o una operación simultánea que cambió
- * el estado de la venta antes de esta (409). Se lanza como objeto puro, no como Error.
+ * @throws {ErrorNegocio} Las de la evaluación (404/409/409/403/409), una operación simultánea que cambió
+ * el estado de la venta antes de esta (409) o un cobro parcial confirmado antes de esta (409 `FIADO_CON_COBROS`,
+ * detectado tras el bloqueo con un `count` de `detalles_cobro_deudor`). Se lanza como objeto puro, no como Error.
  */
 export async function anularVentaAtomica(
   input: AnularVentaInput,
@@ -376,7 +398,15 @@ export async function anularVentaAtomica(
     // --- LECTURA Y EVALUACIÓN ---
     const ventaLeida = await transaccion.venta.findUnique({
       where: { idVenta: input.idVenta },
-      select: { idVenta: true, numeroComprobante: true, estado: true, fechaHora: true, fechaHoraPago: true },
+      select: {
+        idVenta: true,
+        numeroComprobante: true,
+        estado: true,
+        fechaHora: true,
+        fechaHoraPago: true,
+        // Cuantos cobros tiene (sin importar el estado): el service rechaza (409) la anulacion de un fiado con cobros
+        _count: { select: { detallesCobroDeudor: true } },
+      },
     });
 
     // Cualquier caja abierta sirve (no hace falta la del cobro original). Se lee siempre y el service decide
@@ -386,7 +416,19 @@ export async function anularVentaAtomica(
       select: { idCaja: true },
     });
 
-    const decision = evaluar(ventaLeida, cajaAbierta !== null);
+    const decision = evaluar(
+      ventaLeida === null
+        ? null
+        : {
+            idVenta: ventaLeida.idVenta,
+            numeroComprobante: ventaLeida.numeroComprobante,
+            estado: ventaLeida.estado,
+            fechaHora: ventaLeida.fechaHora,
+            fechaHoraPago: ventaLeida.fechaHoraPago,
+            tieneCobros: ventaLeida._count.detallesCobroDeudor > 0,
+          },
+      cajaAbierta !== null,
+    );
 
     // --- CAMBIO DE ESTADO CONDICIONADO ---
     // El estado y la ventana se exigen en el where del UPDATE y no en un if después del SELECT:
@@ -416,6 +458,14 @@ export async function anularVentaAtomica(
     });
     if (actualizadas.count !== 1) {
       throw crearErrorAnulacionSimultanea(input.idVenta);
+    }
+
+    // Rechequeo de cobros: con la fila ya bloqueada, un cobro parcial confirmado entre la lectura y el UPDATE no lo habria
+    // frenado el where (no modifica la fila de la venta). Es una sentencia nueva en READ COMMITTED: ve el cobro,
+    // y el rollback deshace el cambio de estado. Va antes de reponer stock para no hacer trabajo que se va a revertir.
+    const cobrosRegistrados = await transaccion.detalleCobroDeudor.count({ where: { idVenta: input.idVenta } });
+    if (cobrosRegistrados > 0) {
+      throw crearErrorFiadoConCobros(input.idVenta, "anular ni modificar");
     }
 
     // --- REPOSICIÓN DE STOCK ---

@@ -1,7 +1,13 @@
 import type { z } from "zod";
 import type { Decimal } from "../../shared/decimal.js";
 import type { Deudor } from "../deudores/deudores.types.js";
-import type { consultarCuentasCorrientesSchema, consultarEstadoCuentaSchema } from "./cuentas-corrientes.schemas.js";
+import type { MedioPagoVigente, PagoCobroCalculado } from "../ventas/ventas.types.js";
+import type {
+  consultarCuentasCorrientesSchema,
+  consultarEstadoCuentaSchema,
+  registrarCobroCuerpoSchema,
+  registrarCobroParametrosSchema,
+} from "./cuentas-corrientes.schemas.js";
 
 // --- ENTRADA ---
 
@@ -121,4 +127,136 @@ export type EstadoCuentaResponse = {
   deudor: Deudor;
   saldo: string;
   fiados: FiadoDeEstadoCuenta[];
+};
+
+// ===== COBRO DE FIADOS: ENTRADA =====
+
+/** Parametro de ruta validado de `POST /api/cuentas-corrientes/:idDeudor/cobros`. */
+export type RegistrarCobroParametros = z.infer<typeof registrarCobroParametrosSchema>;
+
+/** Body validado del cobro, inferido del esquema Zod. No incluye al usuario: sale del token. */
+export type RegistrarCobroCuerpo = z.infer<typeof registrarCobroCuerpoSchema>;
+
+/** Entrada completa del cobro: el deudor de la ruta, el body y el usuario del token ya verificado. */
+export type RegistrarCobroInput = RegistrarCobroCuerpo &
+  RegistrarCobroParametros & {
+    /** Usuario de la sesion; nunca se toma del body. Queda como `cobros_deudor.id_usuario`. */
+    idUsuario: number;
+  };
+
+// ===== COBRO DE FIADOS: DATOS DE LA BASE =====
+
+/** Estado de una venta tal como se lee para cobrarla: el service rechaza todo el que no sea `PENDIENTE_PAGO`. */
+export type EstadoVentaLeida = "COMPLETADA" | "PENDIENTE_PAGO" | "ANULADA";
+
+/** Un fiado del deudor leido para cobrarlo: lo del estado de cuenta mas su estado actual (puede haber cambiado). */
+export type FiadoParaCobro = FiadoLeido & {
+  estado: EstadoVentaLeida;
+};
+
+/** Medio de pago leido para el cobro: lo que necesita el calculo de ventas mas el nombre vigente para el recibo. */
+export type MedioPagoCobro = MedioPagoVigente & {
+  nombre: string;
+};
+
+/**
+ * Lo que lee el repository dentro de la transaccion, ya con los fiados bloqueados, para que el service calcule el cobro.
+ * `fiados` trae solo los pedidos que existen y son del deudor, ordenados por `idVenta`: un pedido que falta es un 404.
+ */
+export type LecturaCobro = {
+  /** El deudor, o `null` si no existe (el service decide el 404). */
+  deudor: Deudor | null;
+  fiados: FiadoParaCobro[];
+  medios: MedioPagoCobro[];
+};
+
+// ===== COBRO DE FIADOS: RESULTADO DEL CALCULO =====
+
+/** Un fiado del cobro con lo abonado y lo que falta antes y despues. Todo con Decimal exacto. */
+export type FiadoCobradoCalculado = {
+  idVenta: number;
+  numeroComprobante: string | null;
+  montoAbonado: Decimal;
+  faltaAntes: Decimal;
+  /** `faltaAntes - montoAbonado`. Si es 0 el repository pasa el fiado a `COMPLETADA` en la misma transaccion. */
+  faltaDespues: Decimal;
+};
+
+/** Un pago ya calculado (recargo o descuento, recibido y vuelto, en centavos como en ventas) con el nombre de su medio. */
+export type PagoCobroConNombre = PagoCobroCalculado & {
+  nombreMedioPago: string;
+};
+
+/** Resultado de `calcularCobro`, listo para persistir. */
+export type CobroCalculado = {
+  deudor: Deudor;
+  /** En el orden en que se pidieron. */
+  fiados: FiadoCobradoCalculado[];
+  /** En el orden en que se pidieron. */
+  pagos: PagoCobroConNombre[];
+  /** Suma de lo abonado a los fiados (igual a la suma de las bases de los pagos). */
+  totalAbonado: Decimal;
+};
+
+/** Lo que devuelve el repository tras guardar: el recibo y los fiados pendientes que le quedan al deudor, releidos. */
+export type CobroPersistido = {
+  idCobroDeudor: number;
+  /** `REC-` mas el id con 8 digitos. */
+  numeroRecibo: string;
+  /** Instante del cobro; es tambien la `fecha_hora_pago` de los fiados que se completaron. */
+  fechaHora: Date;
+  /** Fiados `PENDIENTE_PAGO` del deudor despues de escribir: de ahi sale `saldoDeudorDespues` con la misma formula del estado de cuenta. */
+  fiadosPendientesDespues: FiadoLeido[];
+};
+
+// ===== COBRO DE FIADOS: RESPUESTA HTTP =====
+
+/** Un fiado en el recibo. Los importes van como texto con 2 decimales. */
+export type FiadoCobrado = {
+  idVenta: number;
+  numeroComprobante: string | null;
+  montoAbonado: string;
+  faltaAntes: string;
+  faltaDespues: string;
+  /** `COMPLETADA` si `faltaDespues` es 0; si no, sigue `PENDIENTE_PAGO`. */
+  estado: "PENDIENTE_PAGO" | "COMPLETADA";
+};
+
+/** Un pago en el recibo. Los importes van como texto con 2 decimales y el porcentaje con 2 (recargo positivo, descuento negativo). */
+export type PagoDeCobro = {
+  idMedioPago: number;
+  nombreMedioPago: string;
+  montoBase: string;
+  porcentajeAplicado: string;
+  montoFinal: string;
+  /** Nulo si el medio no es efectivo o no se informo el monto recibido. */
+  montoRecibido: string | null;
+  /** Nulo siempre que `montoRecibido` sea nulo. */
+  vuelto: string | null;
+};
+
+/** Respuesta exitosa (201) de `POST /api/cuentas-corrientes/:idDeudor/cobros`. */
+export type RegistrarCobroResponse = {
+  exito: true;
+  cobro: {
+    idCobroDeudor: number;
+    numeroRecibo: string;
+    /** Instante del cobro en ISO 8601. */
+    fechaHora: string;
+  };
+  deudor: Deudor;
+  fiados: FiadoCobrado[];
+  pagos: PagoDeCobro[];
+  /** Suma de lo abonado a los fiados (suma de las bases): lo que baja la deuda. */
+  totalAbonado: string;
+  /** Suma de los montos finales: lo que paga el cliente, con los recargos o descuentos de los medios. */
+  totalCobrado: string;
+  /** Lo que el deudor debe despues del cobro, con la misma formula que su estado de cuenta. */
+  saldoDeudorDespues: string;
+};
+
+/** Lo que devuelve `registrarCobroAtomico` al service: el calculo que se guardo y lo que quedo persistido. */
+export type CobroRegistrado = {
+  calculo: CobroCalculado;
+  persistido: CobroPersistido;
 };

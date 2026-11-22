@@ -12,9 +12,12 @@ import {
   MOTIVO_CAMBIO_LONGITUD_MAXIMA,
   registrarCambioSchema,
 } from "../modules/cambios-mercaderia/cambios-mercaderia.schemas.js";
+import { CODIGOS_ERROR_COBRO } from "../modules/cuentas-corrientes/cuentas-corrientes.errors.js";
 import {
   consultarCuentasCorrientesSchema,
   consultarEstadoCuentaSchema,
+  registrarCobroCuerpoSchema,
+  registrarCobroParametrosSchema,
   TEXTO_BUSQUEDA_LONGITUD_MAXIMA as TEXTO_CUENTAS_CORRIENTES_LONGITUD_MAXIMA,
 } from "../modules/cuentas-corrientes/cuentas-corrientes.schemas.js";
 import { CODIGOS_ERROR_DEUDOR } from "../modules/deudores/deudores.errors.js";
@@ -43,6 +46,7 @@ import {
   TEXTO_CLIENTE_LONGITUD_MAXIMA,
   VALOR_MEDIO_PAGO_MIXTO,
 } from "../modules/ventas/ventas.schemas.js";
+import { CODIGO_FIADO_CON_COBROS } from "../modules/ventas/ventas.errors.js";
 
 // --- ESQUEMAS REUTILIZABLES ---
 
@@ -1683,6 +1687,149 @@ const errorValidacionEstadoCuenta = {
   },
 };
 
+// --- COBRO DE FIADOS DE UN DEUDOR ---
+
+// El body y el parámetro de ruta se derivan de los esquemas Zod reales, para que no se desactualicen
+const esquemaCobroCuerpo = z.toJSONSchema(registrarCobroCuerpoSchema, { io: "input", target: "draft-7" });
+const esquemaCobroParametros = z.toJSONSchema(registrarCobroParametrosSchema, { io: "input", target: "draft-7" });
+const parametroIdDeudorCobro = {
+  name: "idDeudor",
+  in: "path",
+  required: true,
+  description: `Id del deudor dueño de los fiados: entero positivo (máximo ${ID_DEUDOR_MAXIMO}).`,
+  schema: (esquemaCobroParametros.properties ?? {}).idDeudor,
+};
+
+/**
+ * Error de negocio con `codigo` del cobro de fiados (404/409): `{ exito: false, mensaje, codigo }`.
+ * Los mensajes nunca llevan datos personales del deudor (RNF-VENTAS-03): solo ids e importes.
+ * @param codigo Uno de `CODIGOS_ERROR_COBRO`, `DEUDOR_NO_ENCONTRADO` o `FIADO_CON_COBROS`.
+ * @param mensajeEjemplo Mensaje real que produce el servicio para ese código.
+ */
+function crearEsquemaErrorConCodigo(codigo: string, mensajeEjemplo: string) {
+  return {
+    type: "object",
+    properties: {
+      exito: { type: "boolean", example: false },
+      mensaje: { type: "string", example: mensajeEjemplo },
+      codigo: { type: "string", enum: [codigo], example: codigo },
+    },
+    required: ["exito", "mensaje", "codigo"],
+  };
+}
+
+/** Los códigos del cobro vienen del enum real del servicio: si se agrega uno y no se documenta, falla al cargar (no en producción). */
+const [CODIGO_FIADO_NO_ENCONTRADO, CODIGO_FIADO_NO_PENDIENTE, CODIGO_MONTO_EXCEDE_FALTA, CODIGO_SIN_CAJA_ABIERTA, CODIGO_COBRO_SIMULTANEO] =
+  CODIGOS_ERROR_COBRO;
+
+/** 404 del cobro: el deudor no existe, o un `idVenta` no existe o no es un fiado de ese deudor. */
+const fiadoODeudorInexistente = {
+  oneOf: [
+    crearEsquemaErrorConCodigo("DEUDOR_NO_ENCONTRADO", "El deudor 999 no existe"),
+    crearEsquemaErrorConCodigo(CODIGO_FIADO_NO_ENCONTRADO, "La venta 123 no es un fiado del deudor 7"),
+  ],
+};
+
+/** 409 del cobro: cada código es un motivo distinto del rechazo. */
+const conflictoCobro = {
+  oneOf: [
+    crearEsquemaErrorConCodigo(CODIGO_FIADO_NO_PENDIENTE, "El fiado 12 ya no está pendiente de pago"),
+    crearEsquemaErrorConCodigo(CODIGO_MONTO_EXCEDE_FALTA, "El monto 900.00 supera lo que falta pagar (500.00) del fiado 12"),
+    crearEsquemaErrorConCodigo(CODIGO_SIN_CAJA_ABIERTA, "No hay una caja abierta para registrar el cobro"),
+    crearEsquemaErrorConCodigo(
+      CODIGO_COBRO_SIMULTANEO,
+      "Otro cobro está procesando estos fiados en este momento: no se registró nada, reintente en unos segundos",
+    ),
+  ],
+};
+
+/** 409 de Liquidar Fiado y de la anulación (baja y edición) sobre un fiado que ya tiene cobros de deudor. */
+const fiadoConCobros = crearEsquemaErrorConCodigo(
+  CODIGO_FIADO_CON_COBROS,
+  "El fiado 12 ya tiene cobros registrados: no se puede cobrar por completo",
+);
+
+/** Error de validación (400) del cobro de fiados: mismo formato, con los campos propios del body. */
+const errorValidacionCobroDeudor = {
+  ...errorValidacion,
+  properties: {
+    ...errorValidacion.properties,
+    mensaje: { type: "string", example: "Datos de cobro inválidos" },
+    errores: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          campo: { type: "string", example: "pagos" },
+          mensaje: {
+            type: "string",
+            example: "La suma de los pagos (1000.00) no coincide con la suma abonada a los fiados (1500.00)",
+          },
+        },
+      },
+    },
+  },
+};
+
+/** Respuesta exitosa (201) de `POST /api/cuentas-corrientes/{idDeudor}/cobros` (ver `RegistrarCobroResponse`). Importes como texto con 2 decimales. */
+const cobroDeudorRegistrado = {
+  type: "object",
+  properties: {
+    exito: { type: "boolean", example: true },
+    cobro: {
+      type: "object",
+      properties: {
+        idCobroDeudor: { type: "integer", example: 5 },
+        numeroRecibo: { type: "string", example: "REC-00000005", description: "`REC-` más el id del cobro con 8 dígitos" },
+        fechaHora: { type: "string", format: "date-time", description: "Instante del cobro; es también la fecha de pago de los fiados que se completaron" },
+      },
+      required: ["idCobroDeudor", "numeroRecibo", "fechaHora"],
+    },
+    deudor,
+    fiados: {
+      type: "array",
+      description: "Los fiados abonados, en el orden pedido",
+      items: {
+        type: "object",
+        properties: {
+          idVenta: { type: "integer", example: 12 },
+          numeroComprobante: { type: "string", nullable: true, example: "CMP-00000012" },
+          montoAbonado: { type: "string", example: "500.00" },
+          faltaAntes: { type: "string", example: "1500.00" },
+          faltaDespues: { type: "string", example: "1000.00", description: "`faltaAntes - montoAbonado`" },
+          estado: {
+            type: "string",
+            enum: ["PENDIENTE_PAGO", "COMPLETADA"],
+            example: "PENDIENTE_PAGO",
+            description: "`COMPLETADA` si `faltaDespues` es 0 (el fiado se completó en este cobro); si no, sigue `PENDIENTE_PAGO`",
+          },
+        },
+        required: ["idVenta", "numeroComprobante", "montoAbonado", "faltaAntes", "faltaDespues", "estado"],
+      },
+    },
+    pagos: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          idMedioPago: { type: "integer", example: 1 },
+          nombreMedioPago: { type: "string", example: "Efectivo" },
+          montoBase: { type: "string", example: "500.00", description: "Porción base que aporta este medio, antes del recargo o descuento" },
+          porcentajeAplicado: { type: "string", example: "0.00", description: "Recargo (positivo) o descuento (negativo) vigente hoy del medio, congelado en el cobro" },
+          montoFinal: { type: "string", example: "500.00", description: "`montoBase` con el ajuste del medio: lo que paga el cliente y lo que ingresa a caja" },
+          montoRecibido: { type: "string", nullable: true, example: "1000.00", description: "Solo efectivo; nulo si el medio no es efectivo o no se informó" },
+          vuelto: { type: "string", nullable: true, example: "500.00", description: "Monto recibido menos monto final; nulo siempre que `montoRecibido` sea nulo" },
+        },
+        required: ["idMedioPago", "nombreMedioPago", "montoBase", "porcentajeAplicado", "montoFinal", "montoRecibido", "vuelto"],
+      },
+    },
+    totalAbonado: { type: "string", example: "500.00", description: "Suma de lo abonado a los fiados (suma de las bases): lo que baja la deuda" },
+    totalCobrado: { type: "string", example: "500.00", description: "Suma de los montos finales: lo que paga el cliente, con los recargos o descuentos" },
+    saldoDeudorDespues: { type: "string", example: "1000.00", description: "Lo que debe el deudor después del cobro, con la misma fórmula de su estado de cuenta" },
+  },
+  required: ["exito", "cobro", "deudor", "fiados", "pagos", "totalAbonado", "totalCobrado", "saldoDeudorDespues"],
+};
+
 // --- CUERPO DEL ALTA DE VENTA ---
 
 const esquemaAltaVenta = z.toJSONSchema(registrarVentaSchema, { io: "input", target: "draft-7" });
@@ -1994,8 +2141,23 @@ export const openapiDocument = {
             content: { "application/json": { schema: ventaInexistente } },
           },
           "409": {
-            description: "La venta no está PENDIENTE_PAGO, no hay una caja abierta, o se detectó un doble cobro",
-            content: { "application/json": { schema: errorNegocio } },
+            description:
+              "La venta no está PENDIENTE_PAGO, no hay una caja abierta, se detectó un doble cobro, o el fiado ya tiene cobros de deudor " +
+              "(`FIADO_CON_COBROS`: un fiado con cobros parciales se salda desde su cuenta corriente, no se liquida por completo)",
+            content: {
+              "application/json": {
+                schema: { oneOf: [errorNegocio, fiadoConCobros] },
+                examples: {
+                  "Fiado con cobros": {
+                    value: {
+                      exito: false,
+                      mensaje: "El fiado 12 ya tiene cobros registrados: no se puede cobrar por completo",
+                      codigo: "FIADO_CON_COBROS",
+                    },
+                  },
+                },
+              },
+            },
           },
           ...respuestasProteccion,
         },
@@ -2076,8 +2238,22 @@ export const openapiDocument = {
           "409": {
             description:
               "La venta ya está ANULADA, cambió de estado mientras se procesaba (otra anulación o un cobro simultáneo), " +
-              "o tuvo cobro y no hay ninguna caja abierta",
-            content: { "application/json": { schema: errorNegocio } },
+              "tuvo cobro y no hay ninguna caja abierta, o es un fiado con cobros de deudor, sin importar su estado " +
+              "(`FIADO_CON_COBROS`: no se anula ni se modifica; se evalúa antes que el plazo de 15 minutos)",
+            content: {
+              "application/json": {
+                schema: { oneOf: [errorNegocio, fiadoConCobros] },
+                examples: {
+                  "Fiado con cobros": {
+                    value: {
+                      exito: false,
+                      mensaje: "El fiado 12 ya tiene cobros registrados: no se puede anular ni modificar",
+                      codigo: "FIADO_CON_COBROS",
+                    },
+                  },
+                },
+              },
+            },
           },
         },
       },
@@ -2423,6 +2599,152 @@ export const openapiDocument = {
           "404": {
             description: "El deudor no existe (`DEUDOR_NO_ENCONTRADO`)",
             content: { "application/json": { schema: deudorInexistente } },
+          },
+          ...respuestasProteccion,
+        },
+      },
+    },
+    "/api/cuentas-corrientes/{idDeudor}/cobros": {
+      post: {
+        tags: ["Ventas"],
+        security: [{ bearerAuth: [] }],
+        summary: "Cobrar uno o varios fiados de un deudor",
+        description:
+          "Registra en una sola operación el cobro de uno o varios fiados (`PENDIENTE_PAGO`) del mismo deudor, con pagos parciales, " +
+          "uno o varios medios de pago y un recibo consolidado (`REC-` más el id con 8 dígitos). " +
+          "**fiados:** por cada uno, `idVenta` y `monto` (mayor a 0, hasta 2 decimales y no mayor a lo que falta de ese fiado; sin `idVenta` repetido). " +
+          "Lo que falta es el importe adeudado (subtotal bruto menos descuento manual) menos lo ya cobrado: es el mismo `falta` del estado de cuenta. " +
+          "**pagos:** la misma forma que en Liquidar Fiado: `idMedioPago`, `monto` (la porción base, sin recargo) y `montoRecibido` opcional, solo en un medio EFECTIVO " +
+          "(debe ser mayor o igual al monto final de esa línea; el servidor calcula el vuelto). Sin medio repetido. " +
+          "La suma de los `monto` de `pagos` debe ser igual a la suma de los `monto` de `fiados`. " +
+          "El recargo o descuento VIGENTE HOY de cada medio se aplica sobre su porción base, una sola vez para todo el cobro (no por fiado). " +
+          "Cuando lo que falta de un fiado llega a 0 pasa a `COMPLETADA` en la misma transacción, con la fecha del cobro como fecha de pago; " +
+          "su `montoTotal` no se modifica y conserva `id_caja` en null: la caja vive en el cobro. Si queda algo por pagar, sigue `PENDIENTE_PAGO`. " +
+          "El ingreso a caja es el monto final de cada pago (nunca el recibido) y se asienta en la última caja abierta; el usuario del cobro sale del token. " +
+          "**Todo o nada:** ante cualquier error no se guarda nada. " +
+          "**Concurrencia:** los fiados se bloquean ordenados por id antes de calcular, así que dos cobros simultáneos sobre el mismo fiado no pueden pagar de más: " +
+          "el segundo calcula con lo que falta ya actualizado y responde 409 (`MONTO_EXCEDE_FALTA` o `FIADO_NO_PENDIENTE`); " +
+          "si la espera del bloqueo vence responde 409 `COBRO_SIMULTANEO` (reintentar). " +
+          "Un fiado con al menos un cobro ya no se puede liquidar por completo, anular ni modificar (409 `FIADO_CON_COBROS`). " +
+          "Los cobros no se pueden anular en esta versión. Requiere sesión y caja abierta; pueden usarlo los tres roles (VENDEDOR, GESTOR_COMERCIAL y GERENTE).",
+        parameters: [parametroIdDeudorCobro],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: esquemaCobroCuerpo,
+              examples: {
+                "Pago parcial de un fiado, en efectivo con vuelto": {
+                  value: { fiados: [{ idVenta: 12, monto: 500 }], pagos: [{ idMedioPago: 1, monto: 500, montoRecibido: 1000 }] },
+                },
+                "Dos fiados (uno completo) con dos medios de pago": {
+                  value: {
+                    fiados: [
+                      { idVenta: 12, monto: 1000 },
+                      { idVenta: 15, monto: 250.5 },
+                    ],
+                    pagos: [
+                      { idMedioPago: 1, monto: 750.5 },
+                      { idMedioPago: 2, monto: 500 },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "201": {
+            description: "Cobro registrado: recibo consolidado con el detalle de fiados y pagos, y el saldo del deudor después del cobro",
+            content: {
+              "application/json": {
+                schema: cobroDeudorRegistrado,
+                example: {
+                  exito: true,
+                  cobro: { idCobroDeudor: 5, numeroRecibo: "REC-00000005", fechaHora: "2026-11-22T15:30:00.000Z" },
+                  deudor: { idDeudor: 7, nombreCompleto: "Prueba Uno", telefono: "5491100000001", dni: "99000001" },
+                  fiados: [
+                    {
+                      idVenta: 12,
+                      numeroComprobante: "CMP-00000012",
+                      montoAbonado: "500.00",
+                      faltaAntes: "1500.00",
+                      faltaDespues: "1000.00",
+                      estado: "PENDIENTE_PAGO",
+                    },
+                  ],
+                  pagos: [
+                    {
+                      idMedioPago: 1,
+                      nombreMedioPago: "Efectivo",
+                      montoBase: "500.00",
+                      porcentajeAplicado: "0.00",
+                      montoFinal: "500.00",
+                      montoRecibido: "1000.00",
+                      vuelto: "500.00",
+                    },
+                  ],
+                  totalAbonado: "500.00",
+                  totalCobrado: "500.00",
+                  saldoDeudorDespues: "1000.00",
+                },
+              },
+            },
+          },
+          "400": {
+            description:
+              "`idDeudor` o body inválido (`fiados` o `pagos` vacíos, `idVenta` o medio repetido, monto menor o igual a 0 o con más de 2 decimales, " +
+              "suma de pagos distinta de la suma de fiados), o regla de los pagos incumplida (medio inactivo, `montoRecibido` menor al monto final o en un medio que no es efectivo)",
+            content: { "application/json": { schema: { oneOf: [errorValidacionCobroDeudor, errorNegocio] } } },
+          },
+          "404": {
+            description:
+              "El deudor no existe (`DEUDOR_NO_ENCONTRADO`), un `idVenta` no existe o no es un fiado de ese deudor (`FIADO_NO_ENCONTRADO`), o un medio de pago no existe (sin código)",
+            content: {
+              "application/json": {
+                schema: { oneOf: [...fiadoODeudorInexistente.oneOf, errorNegocio] },
+                examples: {
+                  "Deudor inexistente": {
+                    value: { exito: false, mensaje: "El deudor 999 no existe", codigo: "DEUDOR_NO_ENCONTRADO" },
+                  },
+                  "Fiado inexistente o de otro deudor": {
+                    value: { exito: false, mensaje: "La venta 123 no es un fiado del deudor 7", codigo: "FIADO_NO_ENCONTRADO" },
+                  },
+                },
+              },
+            },
+          },
+          "409": {
+            description:
+              "Un fiado ya no está pendiente (`FIADO_NO_PENDIENTE`), un monto supera lo que falta (`MONTO_EXCEDE_FALTA`), no hay caja abierta (`SIN_CAJA_ABIERTA`) " +
+              "o otro cobro tiene bloqueados los mismos fiados (`COBRO_SIMULTANEO`, reintentar). No se guarda nada",
+            content: {
+              "application/json": {
+                schema: conflictoCobro,
+                examples: {
+                  "Fiado ya cobrado o anulado": {
+                    value: { exito: false, mensaje: "El fiado 12 ya no está pendiente de pago", codigo: "FIADO_NO_PENDIENTE" },
+                  },
+                  "Monto mayor a lo que falta": {
+                    value: {
+                      exito: false,
+                      mensaje: "El monto 900.00 supera lo que falta pagar (500.00) del fiado 12",
+                      codigo: "MONTO_EXCEDE_FALTA",
+                    },
+                  },
+                  "Sin caja abierta": {
+                    value: { exito: false, mensaje: "No hay una caja abierta para registrar el cobro", codigo: "SIN_CAJA_ABIERTA" },
+                  },
+                  "Cobro simultáneo": {
+                    value: {
+                      exito: false,
+                      mensaje: "Otro cobro está procesando estos fiados en este momento: no se registró nada, reintente en unos segundos",
+                      codigo: "COBRO_SIMULTANEO",
+                    },
+                  },
+                },
+              },
+            },
           },
           ...respuestasProteccion,
         },

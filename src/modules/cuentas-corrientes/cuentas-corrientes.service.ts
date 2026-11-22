@@ -2,9 +2,27 @@ import { Decimal, redondearAMoneda } from "../../shared/decimal.js";
 import { calcularHoyArgentina } from "../../shared/fecha-argentina.js";
 import { calcularImporteAdeudado } from "../../shared/importe-adeudado.js";
 import { crearErrorDeudorNoEncontrado } from "../deudores/deudores.errors.js";
-import { calcularDesplazamiento, calcularTotalPaginas } from "../ventas/ventas.service.js";
-import { buscarEstadoCuentaDeudor, buscarPaginaCuentasCorrientes } from "./cuentas-corrientes.repository.js";
+import {
+  adjuntarMontoRecibidoYVuelto,
+  calcularDesplazamiento,
+  calcularPagosVenta,
+  calcularTotalPaginas,
+  formatearBasisPoints,
+  formatearCentavos,
+} from "../ventas/ventas.service.js";
+import {
+  crearErrorFiadoNoEncontrado,
+  crearErrorFiadoNoPendiente,
+  crearErrorMontoExcedeFalta,
+} from "./cuentas-corrientes.errors.js";
+import {
+  buscarEstadoCuentaDeudor,
+  buscarPaginaCuentasCorrientes,
+  registrarCobroAtomico,
+} from "./cuentas-corrientes.repository.js";
 import type {
+  CobroCalculado,
+  CobroRegistrado,
   ConsultarCuentasCorrientesInput,
   ConsultarCuentasCorrientesResponse,
   ConsultarEstadoCuentaInput,
@@ -12,9 +30,15 @@ import type {
   EstadoCuentaLeido,
   EstadoCuentaResponse,
   FilaCuentaCorriente,
+  FiadoCobrado,
+  FiadoCobradoCalculado,
   FiadoDeEstadoCuenta,
   FiadoLeido,
   FiltroCuentasCorrientes,
+  LecturaCobro,
+  PagoDeCobro,
+  RegistrarCobroInput,
+  RegistrarCobroResponse,
 } from "./cuentas-corrientes.types.js";
 
 // --- UTILIDADES ---
@@ -148,4 +172,157 @@ export function calcularEstadoCuenta(idDeudor: number, leido: EstadoCuentaLeido,
 export async function consultarEstadoCuenta(entrada: ConsultarEstadoCuentaInput): Promise<EstadoCuentaResponse> {
   const leido = await buscarEstadoCuentaDeudor(entrada.idDeudor);
   return calcularEstadoCuenta(entrada.idDeudor, leido, new Date());
+}
+
+// ===== COBRO DE FIADOS: ORQUESTACION =====
+
+/**
+ * Registra el cobro de uno o varios fiados de un deudor: calcula con reglas puras y persiste en una unica transaccion.
+ * El calculo se inyecta al repository como funcion para que corra dentro de la transaccion, con los fiados ya bloqueados
+ * y leidos en ese mismo momento (asi la falta de cada fiado es la vigente, no la de una lectura vieja).
+ * @param entrada Parametro de ruta, body validado y usuario del token.
+ * @returns Respuesta lista para enviar al frontend (recibo consolidado).
+ * @throws {ErrorNegocio} Si alguna regla de negocio no se cumple (nada queda escrito). Se lanza como objeto puro, no como Error.
+ */
+export async function registrarCobro(entrada: RegistrarCobroInput): Promise<RegistrarCobroResponse> {
+  const registrado = await registrarCobroAtomico(entrada, (lectura) => calcularCobro(entrada, lectura));
+  return armarRespuestaCobro(registrado);
+}
+
+// ===== COBRO DE FIADOS: CALCULO PURO =====
+
+/**
+ * Aplica las reglas de negocio del cobro sin acceder a la base ni al reloj (es pura a proposito: se prueba con datos de ejemplo).
+ * La falta de cada fiado sale de `calcularImportesFiado`, la misma funcion del estado de cuenta: una sola definicion.
+ * Orden de comprobaciones (parte del contrato): deudor 404; todos los fiados existen y son del deudor, 404; luego,
+ * fiado por fiado en el orden pedido, no pendiente 409 y monto mayor a la falta 409; por ultimo los pagos
+ * (medio inexistente 404, inactivo 400, recibido 400). La caja (409) la comprueba el repository despues.
+ * El recargo o descuento de cada medio se aplica sobre la porcion base de cada pago, una sola vez para todo el cobro
+ * (no por fiado), con `calcularPagosVenta`, igual que en el alta de venta y en Liquidar Fiado.
+ * Dinero: sumas y comparaciones con Decimal exacto. Los centavos enteros solo se usan para llamar a las funciones de pagos
+ * de ventas (que trabajan en centavos); un entero es exacto, no hay coma flotante.
+ * @param entrada Parametro de ruta y body validados.
+ * @param lectura Deudor, fiados bloqueados y medios de pago, leidos dentro de la transaccion.
+ * @throws {ErrorNegocio} 404 deudor o fiado, 409 fiado no pendiente o monto mayor a la falta, y los de los pagos (404/400).
+ */
+export function calcularCobro(entrada: RegistrarCobroInput, lectura: LecturaCobro): CobroCalculado {
+  if (lectura.deudor === null) {
+    throw crearErrorDeudorNoEncontrado(entrada.idDeudor);
+  }
+
+  const fiadosPorId = new Map(lectura.fiados.map((fiado) => [fiado.idVenta, fiado]));
+
+  // Primero que todos existan: un 404 no debe quedar tapado por un 409 de otro fiado del mismo pedido.
+  // La lectura solo trae fiados de este deudor, asi que "no esta" cubre "no existe" y "es de otro deudor"
+  for (const fiadoPedido of entrada.fiados) {
+    if (!fiadosPorId.has(fiadoPedido.idVenta)) {
+      throw crearErrorFiadoNoEncontrado(fiadoPedido.idVenta, entrada.idDeudor);
+    }
+  }
+
+  const fiados = entrada.fiados.map((fiadoPedido): FiadoCobradoCalculado => {
+    const fiado = fiadosPorId.get(fiadoPedido.idVenta);
+    if (fiado === undefined) {
+      // Inalcanzable: el bucle anterior ya lo verifico; es una defensa que ademas estrecha el tipo
+      throw crearErrorFiadoNoEncontrado(fiadoPedido.idVenta, entrada.idDeudor);
+    }
+    if (fiado.estado !== "PENDIENTE_PAGO") {
+      throw crearErrorFiadoNoPendiente(fiado.idVenta);
+    }
+
+    const { falta } = calcularImportesFiado(fiado);
+    // `toString` del numero del body conserva lo que escribio quien llamo (0.1), sin ruido binario
+    const montoAbonado = new Decimal(fiadoPedido.monto.toString());
+    if (montoAbonado.gt(falta)) {
+      throw crearErrorMontoExcedeFalta(fiado.idVenta, formatearImporte(montoAbonado), formatearImporte(falta));
+    }
+
+    return {
+      idVenta: fiado.idVenta,
+      numeroComprobante: fiado.numeroComprobante,
+      montoAbonado,
+      faltaAntes: falta,
+      faltaDespues: falta.minus(montoAbonado),
+    };
+  });
+
+  const totalAbonado = fiados.reduce((suma, fiado) => suma.plus(fiado.montoAbonado), new Decimal(0));
+
+  // Los pagos deben cubrir exactamente lo abonado (el esquema ya lo exigio; `calcularPagosVenta` lo vuelve a verificar).
+  // Un importe con 2 decimales por 100 es un entero exacto: no hay redondeo ni coma flotante
+  const importeCentavos = totalAbonado.times(100).toNumber();
+  const pagosCalculados = adjuntarMontoRecibidoYVuelto(
+    entrada.pagos,
+    calcularPagosVenta(entrada.pagos, lectura.medios, importeCentavos),
+    lectura.medios,
+  );
+
+  const nombresPorMedio = new Map(lectura.medios.map((medio) => [medio.idMedioPago, medio.nombre]));
+  const pagos = pagosCalculados.map((pago) => ({
+    ...pago,
+    // El valor vacio es inalcanzable: `calcularPagosVenta` ya exigio que cada medio exista
+    nombreMedioPago: nombresPorMedio.get(pago.idMedioPago) ?? "",
+  }));
+
+  return { deudor: lectura.deudor, fiados, pagos, totalAbonado };
+}
+
+// ===== COBRO DE FIADOS: RESPUESTA =====
+
+/** Igual que `formatearCentavos`, pero conserva `null` (recibido y vuelto no aplican fuera del efectivo). */
+function formatearCentavosOpcional(centavos: number | null): string | null {
+  return centavos === null ? null : formatearCentavos(centavos);
+}
+
+/** Convierte un fiado del cobro al formato de la respuesta; queda `COMPLETADA` solo si ya no falta nada. */
+function convertirFiadoCobrado(fiado: FiadoCobradoCalculado): FiadoCobrado {
+  return {
+    idVenta: fiado.idVenta,
+    numeroComprobante: fiado.numeroComprobante,
+    montoAbonado: formatearImporte(fiado.montoAbonado),
+    faltaAntes: formatearImporte(fiado.faltaAntes),
+    faltaDespues: formatearImporte(fiado.faltaDespues),
+    estado: fiado.faltaDespues.isZero() ? "COMPLETADA" : "PENDIENTE_PAGO",
+  };
+}
+
+/**
+ * Arma el recibo del cobro a partir de lo calculado y lo persistido. Pura: no accede a la base ni al reloj.
+ * `saldoDeudorDespues` suma los `falta` de los fiados pendientes releidos tras escribir, con `calcularImportesFiado`
+ * (la misma formula del estado de cuenta). `totalCobrado` es la suma de los montos finales (centavos enteros, exacta).
+ * @param registrado Calculo guardado y datos persistidos (recibo, fecha y fiados pendientes que quedan).
+ */
+export function armarRespuestaCobro(registrado: CobroRegistrado): RegistrarCobroResponse {
+  const { calculo, persistido } = registrado;
+
+  const saldoDeudorDespues = persistido.fiadosPendientesDespues.reduce(
+    (suma, fiado) => suma.plus(calcularImportesFiado(fiado).falta),
+    new Decimal(0),
+  );
+  const totalCobradoCentavos = calculo.pagos.reduce((suma, pago) => suma + pago.montoFinalCentavos, 0);
+
+  return {
+    exito: true,
+    cobro: {
+      idCobroDeudor: persistido.idCobroDeudor,
+      numeroRecibo: persistido.numeroRecibo,
+      fechaHora: persistido.fechaHora.toISOString(),
+    },
+    deudor: calculo.deudor,
+    fiados: calculo.fiados.map(convertirFiadoCobrado),
+    pagos: calculo.pagos.map(
+      (pago): PagoDeCobro => ({
+        idMedioPago: pago.idMedioPago,
+        nombreMedioPago: pago.nombreMedioPago,
+        montoBase: formatearCentavos(pago.montoBaseCentavos),
+        porcentajeAplicado: formatearBasisPoints(pago.porcentajeAplicadoBp),
+        montoFinal: formatearCentavos(pago.montoFinalCentavos),
+        montoRecibido: formatearCentavosOpcional(pago.montoRecibidoCentavos),
+        vuelto: formatearCentavosOpcional(pago.vueltoCentavos),
+      }),
+    ),
+    totalAbonado: formatearImporte(calculo.totalAbonado),
+    totalCobrado: formatearCentavos(totalCobradoCentavos),
+    saldoDeudorDespues: formatearImporte(saldoDeudorDespues),
+  };
 }

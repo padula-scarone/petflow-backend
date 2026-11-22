@@ -12,6 +12,7 @@ import { Decimal } from "../../shared/decimal.js";
 import { calcularHoyArgentina, HORAS_DESFASE_ARGENTINA_RESPECTO_UTC } from "../../shared/fecha-argentina.js";
 import { calcularImporteAdeudado } from "../../shared/importe-adeudado.js";
 import {
+  crearErrorFiadoConCobros,
   crearErrorNegocio,
   crearErrorSinCajaParaAnular,
   crearErrorStockInsuficiente,
@@ -269,14 +270,15 @@ export function calcularPagosVenta(
 
 /**
  * Completa cada pago calculado con su monto recibido y su vuelto.
- * Es compartida por el alta de venta y por el cobro de un fiado: ambos tratan el efectivo igual.
+ * Es compartida por el alta de venta, por Liquidar Fiado y por el cobro de fiados de un deudor
+ * (módulo cuentas-corrientes, que la importa): todos tratan el efectivo igual.
  * @param pagosSolicitados Pagos del cuerpo, con el monto recibido opcional.
  * @param pagosCalculados Resultado de `calcularPagosVenta` para esos mismos pagos.
  * @param medios Medios de pago leídos de la BD, con su tipo.
  * @returns Un pago por cada solicitado, en el mismo orden.
  * @throws {ErrorNegocio} 400 si el recibido va en un medio que no es efectivo o no alcanza el monto final.
  */
-function adjuntarMontoRecibidoYVuelto(
+export function adjuntarMontoRecibidoYVuelto(
   pagosSolicitados: ReadonlyArray<{ idMedioPago: number; montoRecibido?: number | undefined }>,
   pagosCalculados: PagoVentaCalculado[],
   medios: MedioPagoVigente[],
@@ -553,7 +555,7 @@ function formatearMilesimas(milesimas: number): string {
  * Convierte basis points a texto de porcentaje con 2 decimales; conserva el signo del descuento.
  * @example formatearBasisPoints(-500) // "-5.00"
  */
-function formatearBasisPoints(basisPoints: number): string {
+export function formatearBasisPoints(basisPoints: number): string {
   return (basisPoints / 100).toFixed(2);
 }
 
@@ -587,6 +589,7 @@ export async function liquidarFiado(input: LiquidarFiadoInput): Promise<Liquidar
  * @param medios Medios de pago leídos de la BD, con su tipo.
  * @returns Pagos con vuelto, importe adeudado y total cobrado.
  * @throws {ErrorNegocio} Venta inexistente (404), venta que no está pendiente de pago (409),
+ * fiado que ya tiene cobros (409 `FIADO_CON_COBROS`: este flujo cobra por completo y no puede desconocer lo ya abonado),
  * medio inexistente (404), inactivo o con ajuste inválido (400), suma de pagos que no cuadra (400),
  * monto recibido en un medio que no es efectivo (400) o menor al monto final (400).
  * Se lanza como objeto puro, no como Error.
@@ -601,6 +604,11 @@ export function calcularCobroFiado(
   }
   if (venta.estado !== "PENDIENTE_PAGO") {
     throw crearErrorVentaNoPendientePago(venta.idVenta);
+  }
+  // Un fiado con cobros parciales se salda desde su cuenta corriente: este cobro es total sobre el importe adeudado
+  // y cobraria de mas (RF-VENTAS-13)
+  if (venta.tieneCobros) {
+    throw crearErrorFiadoConCobros(venta.idVenta, "cobrar por completo");
   }
 
   // Se cobra lo que se debe (subtotal − descuento) y no el montoTotal guardado:
@@ -725,15 +733,15 @@ export function calcularLimiteVentana(ahora: Date): Date {
 /**
  * Aplica las reglas de negocio de la anulación sin acceder a la base de datos ni al reloj.
  * Es pura a propósito: así se prueba con datos de ejemplo sin conectarse a Supabase.
- * El orden de las comprobaciones es parte del contrato: 404, 409 (ya anulada), 403 (ventana), 409 (sin caja).
+ * El orden de las comprobaciones es parte del contrato: 404, 409 (ya anulada), 409 (fiado con cobros), 403 (ventana), 409 (sin caja).
  * @param input Entrada validada de la anulación (solo se usa el id de la venta; el motivo y el usuario los persiste el repositorio).
  * @param venta Venta leída de la BD, o `null` si no existe.
  * @param ahora Instante actual del servidor.
  * @param hayCajaAbierta Si existe al menos una sesión de caja abierta (cualquiera).
  * @returns El estado anterior, el límite de la ventana y el instante de la anulación, para que el repositorio
  * condicione la transición y registre la auditoría con ese mismo instante.
- * @throws {ErrorNegocio} Venta inexistente (404), ya anulada (409), ventana vencida (403) o
- * venta con cobro sin caja abierta (409). Se lanza como objeto puro, no como Error.
+ * @throws {ErrorNegocio} Venta inexistente (404), ya anulada (409), fiado con cobros (409 `FIADO_CON_COBROS`),
+ * ventana vencida (403) o venta con cobro sin caja abierta (409). Se lanza como objeto puro, no como Error.
  */
 export function evaluarAnulacion(
   input: AnularVentaInput,
@@ -747,6 +755,12 @@ export function evaluarAnulacion(
   // Narrowing: tras descartar ANULADA, el estado leído es uno de los anulables
   if (venta.estado === "ANULADA") {
     throw crearErrorVentaYaAnulada(venta.idVenta);
+  }
+  // Un fiado con cobros no se anula ni se modifica, sin importar su estado (un fiado completado por cobros tambien los tiene):
+  // anularlo repondria el stock pero no revertiria lo cobrado, que ya ingreso en la caja de cada cobro.
+  // Va antes de la ventana: el motivo real del rechazo es mas util que un 403 por tiempo
+  if (venta.tieneCobros) {
+    throw crearErrorFiadoConCobros(venta.idVenta, "anular ni modificar");
   }
 
   // La ventana corre desde el pago si lo hay (un fiado cobrado vuelve a tener 15 min) y si no, desde la venta.
