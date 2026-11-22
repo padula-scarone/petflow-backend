@@ -8,6 +8,8 @@ import {
 // Deuda técnica: importación entre módulos (deudores ya importa de ventas); el error debería vivir en `shared`
 import { crearErrorDeudorNoEncontrado } from "../deudores/deudores.errors.js";
 import type { Deudor } from "../deudores/deudores.types.js";
+import { Decimal } from "../../shared/decimal.js";
+import { calcularImporteAdeudado } from "../../shared/importe-adeudado.js";
 import {
   crearErrorNegocio,
   crearErrorSinCajaParaAnular,
@@ -592,7 +594,10 @@ export function calcularCobroFiado(
 
   // Se cobra lo que se debe (subtotal − descuento) y no el montoTotal guardado:
   // el cobro es total y el descuento manual solo se carga en el alta
-  const importeAdeudadoCentavos = venta.subtotalBrutoCentavos - venta.descuentoManualCentavos;
+  const importeAdeudadoCentavos = calcularImporteAdeudado(
+    new Decimal(venta.subtotalBrutoCentavos),
+    new Decimal(venta.descuentoManualCentavos),
+  ).toNumber();
   const pagos = adjuntarMontoRecibidoYVuelto(
     input.pagos,
     calcularPagosVenta(input.pagos, medios, importeAdeudadoCentavos),
