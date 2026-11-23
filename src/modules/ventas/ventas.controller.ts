@@ -185,7 +185,7 @@ export async function postLiquidarFiado(req: Request, res: Response): Promise<vo
 }
 
 /**
- * Handler de `POST /api/ventas/:idVenta/anulacion`: anula una venta y repone su stock (baja y modificación venta).
+ * Handler de `POST /api/ventas/:idVenta/anulacion`: anula una venta y repone su stock (baja de venta).
  * Valida el parámetro de ruta y el body (el motivo es obligatorio) y delega en el service. No contiene reglas de negocio.
  * La sesión y el rol los exige `requerirRol` en la ruta, no este handler.
  * Quien anula es el usuario del token (`res.locals.sesion`); un `idUsuario` en el body se ignora.

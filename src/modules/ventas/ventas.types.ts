@@ -172,7 +172,7 @@ export type FilaHistorialVenta = {
    */
   numeroComprobante: string | null;
   fechaHora: Date;
-  /** Origen de la ventana de modificación si existe: nulo mientras el fiado no se cobra. */
+  /** Origen de la ventana de anulación si existe: nulo mientras el fiado no se cobra. */
   fechaHoraPago: Date | null;
   estado: EstadoVentaHistorial;
   montoTotalCentavos: number;
@@ -203,7 +203,7 @@ export type VentaHistorial = {
   fechaHora: string;
   estado: EstadoVentaHistorial;
   /**
-   * Hasta cuándo se puede editar o anular (ISO 8601): `LIMITE_MINUTOS_ANULACION` minutos desde el pago
+   * Hasta cuándo se puede anular (ISO 8601): `LIMITE_MINUTOS_ANULACION` minutos desde el pago
    * (o desde la venta si no hay pago). Nulo si la venta está ANULADA.
    */
   fechaHoraLimiteModificacion: string | null;
@@ -357,7 +357,7 @@ export type VentaConsultada = {
   /** Fecha y hora de pago en formato ISO 8601; nulo si es fiado. */
   fechaHoraPago: string | null;
   estado: EstadoVentaHistorial;
-  /** Hasta cuándo se puede editar o anular (ISO 8601); nulo si la venta está ANULADA. Misma regla que el historial. */
+  /** Hasta cuándo se puede anular (ISO 8601); nulo si la venta está ANULADA. Misma regla que el historial. */
   fechaHoraLimiteModificacion: string | null;
   origen: OrigenVenta;
   modalidadEntrega: ModalidadEntrega;
