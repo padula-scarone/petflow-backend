@@ -292,7 +292,7 @@ const historialConsultado = {
       format: "date-time",
       description:
         "Hora del servidor al responder (ISO 8601), tomada después de leer. El front la compara con `fechaHoraLimiteModificacion` " +
-        "para saber si la ventana de edición o anulación sigue abierta",
+        "para saber si la ventana de anulación sigue abierta",
     },
     ventas: {
       type: "array",
@@ -313,7 +313,7 @@ const historialConsultado = {
             format: "date-time",
             nullable: true,
             description:
-              "Hasta cuándo se puede editar o anular: 15 minutos desde el pago (o desde la venta si no hay pago, como en un fiado pendiente). " +
+              "Hasta cuándo se puede anular: 15 minutos desde el pago (o desde la venta si no hay pago, como en un fiado pendiente). " +
               "Misma regla que la anulación. Nulo si la venta está ANULADA",
           },
           montoTotal: { type: "string", example: "1425.00" },
@@ -435,7 +435,7 @@ const ventaConsultada = {
           format: "date-time",
           nullable: true,
           description:
-            "Hasta cuándo se puede editar o anular: 15 minutos desde `fechaHoraPago` (o desde `fechaHora` si no hay pago). " +
+            "Hasta cuándo se puede anular: 15 minutos desde `fechaHoraPago` (o desde `fechaHora` si no hay pago). " +
             "Misma regla que la anulación y que el historial. Nulo si la venta está ANULADA",
         },
         origen: { type: "string", enum: ["MOSTRADOR", "DIGITAL"] },
@@ -1743,7 +1743,7 @@ const conflictoCobro = {
   ],
 };
 
-/** 409 de Liquidar Fiado y de la anulación (baja y edición) sobre un fiado que ya tiene cobros de deudor. */
+/** 409 de Liquidar Fiado y de la anulación (baja) sobre un fiado que ya tiene cobros de deudor. */
 const fiadoConCobros = crearEsquemaErrorConCodigo(
   CODIGO_FIADO_CON_COBROS,
   "El fiado 12 ya tiene cobros registrados: no se puede cobrar por completo",
@@ -2167,7 +2167,7 @@ export const openapiDocument = {
       post: {
         tags: ["Ventas"],
         security: [{ bearerAuth: [] }],
-        summary: "Anular una venta (baja y modificación)",
+        summary: "Anular una venta (baja)",
         description:
           "Anula una venta `COMPLETADA` o `PENDIENTE_PAGO` dentro de una ventana de 15 minutos, contada desde `fechaHoraPago` " +
           "si existe (un fiado cobrado vuelve a tener 15 minutos desde el cobro) y si no desde `fechaHora`; el reloj es el del servidor. " +
@@ -2175,18 +2175,13 @@ export const openapiDocument = {
           "(la misma cantidad vendida al mismo producto) en la misma transacción. Una venta con cobro (`COMPLETADA`) exige alguna caja " +
           "abierta (409 si no hay); un fiado pendiente solo repone stock. La caja se revierte por el solo cambio de estado: " +
           "las ventas `ANULADA` no cuentan como ingreso. " +
-          "El body exige `motivo` (texto de 1 a 200 caracteres, recortado): vale tanto para la baja como para la edición. " +
+          "El body exige `motivo` (texto de 1 a 200 caracteres, recortado). " +
           "La anulación deja auditoría en la misma operación que cambia el estado: quién (el usuario del token, no el vendedor original), " +
           "cuándo (reloj del servidor) y por qué; un `idUsuario` en el body se ignora. La respuesta trae `anulacion` con la fecha y el motivo, " +
           "y `GET /api/ventas/{idVenta}` la devuelve completa, con el usuario (nula en una venta no anulada o anulada antes de que se registrara). " +
           "Una venta `ANULADA` no se puede anular de nuevo (la auditoría original no se modifica) ni cobrar (409). " +
           "Ante pedidos simultáneos sobre la misma venta (dos anulaciones, o un cobro y una anulación) solo uno gana y el otro responde 409. " +
-          "Orden de evaluación: 400, 404, 409 (ya anulada), 403 (ventana vencida), 409 (sin caja abierta). " +
-          "**Edición ágil (modificar una venta):** no hay un endpoint aparte. El front anula con este endpoint, consulta el detalle " +
-          "con `GET /api/ventas/{idVenta}` (que sigue funcionando sobre una venta `ANULADA` y trae ítems, descuento, motivo, origen, " +
-          "modalidad, cliente y pagos) y vuelve a registrar la venta con `POST /api/ventas`. Son tres llamadas independientes: " +
-          "si la última falla, la venta original queda anulada. Al volver a vender se aplican los precios y recargos vigentes ese día, " +
-          "así que el total puede diferir del original.",
+          "Orden de evaluación: 400, 404, 409 (ya anulada), 409 (fiado con cobros: `FIADO_CON_COBROS`), 403 (ventana vencida), 409 (sin caja abierta).",
         parameters: [parametroIdVenta],
         requestBody: {
           required: true,
@@ -2239,7 +2234,7 @@ export const openapiDocument = {
             description:
               "La venta ya está ANULADA, cambió de estado mientras se procesaba (otra anulación o un cobro simultáneo), " +
               "tuvo cobro y no hay ninguna caja abierta, o es un fiado con cobros de deudor, sin importar su estado " +
-              "(`FIADO_CON_COBROS`: no se anula ni se modifica; se evalúa antes que el plazo de 15 minutos)",
+              "(`FIADO_CON_COBROS`: no se anula; se evalúa antes que el plazo de 15 minutos)",
             content: {
               "application/json": {
                 schema: { oneOf: [errorNegocio, fiadoConCobros] },
@@ -2247,7 +2242,7 @@ export const openapiDocument = {
                   "Fiado con cobros": {
                     value: {
                       exito: false,
-                      mensaje: "El fiado 12 ya tiene cobros registrados: no se puede anular ni modificar",
+                      mensaje: "El fiado 12 ya tiene cobros registrados: no se puede anular",
                       codigo: "FIADO_CON_COBROS",
                     },
                   },
@@ -2625,7 +2620,7 @@ export const openapiDocument = {
           "**Concurrencia:** los fiados se bloquean ordenados por id antes de calcular, así que dos cobros simultáneos sobre el mismo fiado no pueden pagar de más: " +
           "el segundo calcula con lo que falta ya actualizado y responde 409 (`MONTO_EXCEDE_FALTA` o `FIADO_NO_PENDIENTE`); " +
           "si la espera del bloqueo vence responde 409 `COBRO_SIMULTANEO` (reintentar). " +
-          "Un fiado con al menos un cobro ya no se puede liquidar por completo, anular ni modificar (409 `FIADO_CON_COBROS`). " +
+          "Un fiado con al menos un cobro ya no se puede liquidar por completo ni anular (409 `FIADO_CON_COBROS`). " +
           "Los cobros no se pueden anular en esta versión. Requiere sesión y caja abierta; pueden usarlo los tres roles (VENDEDOR, GESTOR_COMERCIAL y GERENTE).",
         parameters: [parametroIdDeudorCobro],
         requestBody: {

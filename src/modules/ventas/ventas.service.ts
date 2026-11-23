@@ -388,11 +388,13 @@ export function calcularFiltroHistorial(consulta: ConsultarHistorialInput): Filt
   };
 }
 
-// --- LÍMITE DE MODIFICACIÓN DE UNA VENTA ---
+// --- LÍMITE DE ANULACIÓN DE UNA VENTA ---
 
 /**
- * Calcula hasta cuándo se puede editar o anular una venta: `LIMITE_MINUTOS_ANULACION` minutos desde el pago
+ * Calcula hasta cuándo se puede anular una venta: `LIMITE_MINUTOS_ANULACION` minutos desde el pago
  * (o desde la venta si no hay pago, como en un fiado pendiente).
+ * Es el valor de `fechaHoraLimiteModificacion`: el nombre es del contrato con el front y se mantiene,
+ * pero hoy solo representa la ventana de anulación (la edición ocurre en el front, antes de confirmar la venta).
  * ATENCIÓN: es la misma regla que aplica `evaluarAnulacion` (referencia `fechaHoraPago ?? fechaHora` y la misma
  * constante). Si cambia una, hay que cambiar la otra.
  * @returns El instante límite, o `null` si la venta está ANULADA (ya no tiene ventana).
@@ -695,7 +697,7 @@ function convertirPagoCobrado(pago: PagoCobroCalculado): PagoCobrado {
 // --- ANULACIÓN DE VENTA: ORQUESTACIÓN ---
 
 /**
- * Anula una venta (baja venta y modificación venta son esta misma operación): evalúa las reglas puras
+ * Anula una venta (baja): evalúa las reglas puras
  * y persiste la transición y la reposición de stock en una única transacción.
  * La evaluación se inyecta al repositorio como función para que corra dentro de la transacción,
  * con la venta y la caja leídas en ese mismo momento y con el reloj tomado en ese instante.
@@ -756,11 +758,11 @@ export function evaluarAnulacion(
   if (venta.estado === "ANULADA") {
     throw crearErrorVentaYaAnulada(venta.idVenta);
   }
-  // Un fiado con cobros no se anula ni se modifica, sin importar su estado (un fiado completado por cobros tambien los tiene):
+  // Un fiado con cobros no se anula, sin importar su estado (un fiado completado por cobros tambien los tiene):
   // anularlo repondria el stock pero no revertiria lo cobrado, que ya ingreso en la caja de cada cobro.
   // Va antes de la ventana: el motivo real del rechazo es mas util que un 403 por tiempo
   if (venta.tieneCobros) {
-    throw crearErrorFiadoConCobros(venta.idVenta, "anular ni modificar");
+    throw crearErrorFiadoConCobros(venta.idVenta, "anular");
   }
 
   // La ventana corre desde el pago si lo hay (un fiado cobrado vuelve a tener 15 min) y si no, desde la venta.

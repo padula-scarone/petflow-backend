@@ -105,7 +105,7 @@ export function crearErrorAnulacionSimultanea(idVenta: number): ErrorNegocio {
  */
 export type ErrorNegocioConCodigo = ErrorNegocio & { codigo: string };
 
-/** Codigo de los 409 de Liquidar Fiado y de la anulacion (baja y edicion) sobre un fiado que ya tiene cobros. */
+/** Codigo de los 409 de Liquidar Fiado y de la anulacion (baja) sobre un fiado que ya tiene cobros. */
 export const CODIGO_FIADO_CON_COBROS = "FIADO_CON_COBROS" as const;
 
 /**
@@ -114,7 +114,7 @@ export const CODIGO_FIADO_CON_COBROS = "FIADO_CON_COBROS" as const;
  * desconoceria lo que ya se cobro y su ingreso en caja. Es independiente del estado de la venta
  * (un fiado completado por cobros tambien los tiene).
  * @param idVenta Id del fiado con cobros.
- * @param accionRechazada Lo que se intento hacer, para que el mensaje sea claro ("cobrar por completo" o "anular o modificar").
+ * @param accionRechazada Lo que se intento hacer, para que el mensaje sea claro ("cobrar por completo" o "anular").
  */
 export function crearErrorFiadoConCobros(idVenta: number, accionRechazada: string): ErrorNegocioConCodigo {
   return {

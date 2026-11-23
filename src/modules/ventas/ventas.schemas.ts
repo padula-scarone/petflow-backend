@@ -369,7 +369,8 @@ export const MOTIVO_ANULACION_LONGITUD_MAXIMA = 200;
 
 /**
  * Contrato de entrada del body de `POST /api/ventas/:idVenta/anulacion`: el motivo es obligatorio
- * tanto en la baja como en la edición (es la misma operación). Se recorta antes de medirlo, así que
+ * en la baja (la edición de una venta ocurre en el front antes de confirmarla, no pasa por aquí).
+ * Se recorta antes de medirlo, así que
  * un texto de solo espacios se rechaza. Las claves desconocidas (por ejemplo `idUsuario`) se descartan:
  * quien anula sale siempre del token.
  * La cadena de validación repite a propósito la de `motivoDescuento` en `registrarVentaSchema` para no

@@ -465,7 +465,7 @@ export async function anularVentaAtomica(
     // y el rollback deshace el cambio de estado. Va antes de reponer stock para no hacer trabajo que se va a revertir.
     const cobrosRegistrados = await transaccion.detalleCobroDeudor.count({ where: { idVenta: input.idVenta } });
     if (cobrosRegistrados > 0) {
-      throw crearErrorFiadoConCobros(input.idVenta, "anular ni modificar");
+      throw crearErrorFiadoConCobros(input.idVenta, "anular");
     }
 
     // --- REPOSICIÓN DE STOCK ---
@@ -641,7 +641,7 @@ export async function buscarHistorialVentas(
         orderBy: [{ fechaHora: "desc" }, { idVenta: "desc" }],
         skip: desplazamiento,
         take: cantidadPorPagina,
-        // Solo las columnas de la grilla: payload liviano. `fechaHoraPago` sirve para calcular el límite de modificación
+        // Solo las columnas de la grilla: payload liviano. `fechaHoraPago` sirve para calcular el límite de anulación
         select: {
           idVenta: true,
           numeroComprobante: true,
