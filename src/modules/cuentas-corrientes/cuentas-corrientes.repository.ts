@@ -18,6 +18,7 @@ import type {
   FiadoConPagosLeido,
   FiadoLeido,
   FiltroCuentasCorrientes,
+  FiltroProximoPago,
   LecturaCobro,
   OrdenCuentasCorrientes,
   PaginaCuentasCorrientes,
@@ -226,7 +227,29 @@ function construirOrden(orden: OrdenCuentasCorrientes | undefined): Prisma.Sql {
 }
 
 /**
- * Arma el `WHERE` del listado sobre la tabla `cuentas` de `SQL_SALDOS_POR_DEUDOR`: el filtro de saldo y el de texto.
+ * Arma la condición del filtro `proximoPago` sobre la tabla `cuentas`. Se compara contra `proxima_fecha_estimada_pago`
+ * (la fecha estimada más temprana entre los fiados pendientes, incluidas las vencidas). Las fechas ya vienen resueltas por el
+ * service (aquí no hay "hoy" ni "semana") y van como parámetros con `::date`; el SQL sale solo de estos fragmentos fijos.
+ * Todas las variantes exigen al menos un fiado pendiente: sin eso la fecha es nula y `sinFecha` incluiría a todos los
+ * deudores sin deuda (que tampoco tienen fecha), cuando solo debe traer a los que sí deben pero no tienen fecha.
+ * Un `ELSE` imposible no hace falta: `FiltroProximoPago` es una unión cerrada y TypeScript verifica que se cubran todas.
+ */
+function construirCondicionProximoPago(filtro: FiltroProximoPago): Prisma.Sql {
+  const conFiadosPendientes = Prisma.sql`cantidad_fiados_pendientes > 0`;
+  switch (filtro.tipo) {
+    case "hoy":
+    case "estaSemana":
+      return Prisma.sql`${conFiadosPendientes} AND proxima_fecha_estimada_pago BETWEEN ${filtro.fechaDesde}::date AND ${filtro.fechaHasta}::date`;
+    case "vencidos":
+      return Prisma.sql`${conFiadosPendientes} AND proxima_fecha_estimada_pago < ${filtro.fechaAntesDe}::date`;
+    case "sinFecha":
+      return Prisma.sql`${conFiadosPendientes} AND proxima_fecha_estimada_pago IS NULL`;
+  }
+}
+
+/**
+ * Arma el `WHERE` del listado sobre la tabla `cuentas` de `SQL_SALDOS_POR_DEUDOR`: el filtro de saldo, el de texto y el de próximo pago.
+ * Lo usan la consulta de la página y la del total, por eso los dos filtran igual.
  * Los valores van como parámetros de `Prisma.sql`; el texto solo se arma en el patrón, con sus comodines escapados.
  */
 function construirCondicionCuentas(filtro: FiltroCuentasCorrientes): Prisma.Sql {
@@ -235,6 +258,10 @@ function construirCondicionCuentas(filtro: FiltroCuentasCorrientes): Prisma.Sql 
   // Por defecto solo los que deben. Con `incluirSinDeuda` no se filtra por saldo
   if (!filtro.incluirSinDeuda) {
     condiciones.push(Prisma.sql`saldo > 0`);
+  }
+  // Con `proximoPago` solo cuentan los deudores con fiados pendientes, sea cual sea `incluirSinDeuda` (lo exige la propia condición)
+  if (filtro.proximoPago !== undefined) {
+    condiciones.push(construirCondicionProximoPago(filtro.proximoPago));
   }
   // Nombre o DNI, parcial y sin distinguir mayúsculas (ILIKE), con los comodines del texto escapados
   if (filtro.texto !== undefined) {

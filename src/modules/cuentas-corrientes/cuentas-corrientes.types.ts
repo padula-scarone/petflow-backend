@@ -32,12 +32,29 @@ export type OrdenCuentasCorrientes = {
   sentido: SentidoOrdenCuentasCorrientes;
 };
 
+/** Valor del filtro `proximoPago` tal como llega validado de la query. */
+export type ValorProximoPago = NonNullable<ConsultarCuentasCorrientesInput["proximoPago"]>;
+
+/**
+ * Filtro por próxima fecha estimada de pago ya resuelto por el service: el repository recibe fechas de calendario
+ * (`AAAA-MM-DD`) y no sabe qué es "hoy" ni "esta semana". Todas las variantes exigen al menos un fiado pendiente.
+ * - `hoy` y `estaSemana`: la fecha está entre `fechaDesde` y `fechaHasta`, ambas inclusive (en `hoy` son iguales).
+ * - `vencidos`: la fecha es anterior a `fechaAntesDe` (que no cuenta).
+ * - `sinFecha`: ningún fiado pendiente tiene fecha estimada.
+ */
+export type FiltroProximoPago =
+  | { tipo: "hoy" | "estaSemana"; fechaDesde: string; fechaHasta: string }
+  | { tipo: "vencidos"; fechaAntesDe: string }
+  | { tipo: "sinFecha" };
+
 /** Filtro del listado ya traducido a lo que consulta el repository. */
 export type FiltroCuentasCorrientes = {
   /** Texto a buscar dentro del nombre o del DNI, sin distinguir mayúsculas. Nunca viene vacío; ausente = sin filtro de texto. */
   texto?: string;
   /** Con `false` solo se listan los deudores con saldo mayor a 0. */
   incluirSinDeuda: boolean;
+  /** Filtro por próxima fecha estimada de pago. Ausente = sin filtro. Si está, manda sobre `incluirSinDeuda` (solo con fiados pendientes). */
+  proximoPago?: FiltroProximoPago;
   /**
    * Orden pedido. Ausente = el orden de siempre (saldo descendente, nombre y id ascendentes). No es un filtro, pero viaja junto
    * a ellos porque el repository arma una sola consulta con el filtro y el orden.

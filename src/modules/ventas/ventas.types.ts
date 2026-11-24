@@ -129,6 +129,8 @@ export type RegistrarVentaResponse = {
     fechaEstimadaPago: string | null;
     /** Dirección de envío tal como quedó guardada (ya recortada). Nula con retiro. Dato personal: no se repite en errores ni en logs. */
     direccionEnvio: string | null;
+    /** Destinatario del envío tal como quedó guardado (ya recortado). Nulo con retiro o si no se indicó. Dato personal. */
+    destinatarioEnvio: string | null;
   };
 };
 
@@ -310,6 +312,8 @@ export type VentaDetallada = {
   fechaEstimadaPago: string | null;
   /** Dirección de envío; nula con retiro y en las ventas anteriores a que se registrara. */
   direccionEnvio: string | null;
+  /** Destinatario del envío; nulo con retiro, si no se indicó y en las ventas anteriores a que se registrara. */
+  destinatarioEnvio: string | null;
   vendedor: VendedorVenta;
   subtotalBrutoCentavos: number;
   descuentoManualCentavos: number;
@@ -381,6 +385,8 @@ export type VentaConsultada = {
   fechaEstimadaPago: string | null;
   /** Dirección de envío, o `null` con retiro y en las ventas anteriores. No viaja en el historial (dato personal). */
   direccionEnvio: string | null;
+  /** Destinatario del envío, o `null` con retiro, si no se indicó y en las ventas anteriores. No viaja en el historial (dato personal). */
+  destinatarioEnvio: string | null;
   vendedor: VendedorVenta;
   /** Montos como texto con 2 decimales. */
   subtotalBruto: string;

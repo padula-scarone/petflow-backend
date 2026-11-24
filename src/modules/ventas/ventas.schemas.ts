@@ -103,6 +103,9 @@ export const MODALIDADES_ENTREGA = ["RETIRO", "ENVIO"] as const;
 /** Largo máximo de `direccionEnvio`: coincide con la columna `ventas.direccion_envio` (VARCHAR(200)). */
 export const DIRECCION_ENVIO_LONGITUD_MAXIMA = 200;
 
+/** Largo máximo de `destinatarioEnvio`: coincide con la columna `ventas.destinatario_envio` (VARCHAR(100)). */
+export const DESTINATARIO_ENVIO_LONGITUD_MAXIMA = 100;
+
 // --- ESQUEMA PRINCIPAL ---
 
 /**
@@ -111,6 +114,7 @@ export const DIRECCION_ENVIO_LONGITUD_MAXIMA = 200;
  * Que el deudor exista lo verifica el service (el esquema no conoce la base).
  * `direccionEnvio` es obligatoria con `modalidadEntrega` ENVIO y no se admite con RETIRO (400 en ambos casos). Es un dato
  * personal: ningún mensaje de validación repite el valor recibido (RNF-VENTAS-03).
+ * `destinatarioEnvio` (1 a 100, recortado) es opcional con ENVIO y no se admite con RETIRO; tiene el mismo trato de dato personal.
  * `fechaEstimadaPago` (`AAAA-MM-DD`) es opcional y nula equivale a omitida ("sin fecha"); solo se admite en un fiado:
  * una venta de contado con fecha no nula es 400. Que no sea anterior a hoy lo verifica el service (depende del reloj).
  * El vendedor no viaja en el body: sale del token. Si llega `idUsuario`, Zod lo descarta sin error (el objeto no es estricto).
@@ -126,6 +130,16 @@ export const registrarVentaSchema = z
       .trim()
       .min(1, "La dirección de envío no puede estar vacía")
       .max(DIRECCION_ENVIO_LONGITUD_MAXIMA, `La dirección de envío admite hasta ${DIRECCION_ENVIO_LONGITUD_MAXIMA} caracteres`)
+      .optional(),
+    // Opcional incluso con ENVIO (no siempre se sabe quién recibe). Mismo tratamiento que la dirección: recortado y con mensajes fijos
+    destinatarioEnvio: z
+      .string({ error: "El destinatario de envío debe ser texto" })
+      .trim()
+      .min(1, "El destinatario de envío no puede estar vacío")
+      .max(
+        DESTINATARIO_ENVIO_LONGITUD_MAXIMA,
+        `El destinatario de envío admite hasta ${DESTINATARIO_ENVIO_LONGITUD_MAXIMA} caracteres`,
+      )
       .optional(),
     idDeudor: z.number().int().positive().max(ID_ENTERO_MAXIMO).optional(),
     fechaEstimadaPago: fechaCalendarioSchema.nullish(),
@@ -160,6 +174,14 @@ export const registrarVentaSchema = z
         code: "custom",
         path: ["direccionEnvio"],
         message: "Una venta con retiro no admite dirección de envío",
+      });
+    }
+    // El destinatario solo tiene sentido si hay envío; con retiro es una contradicción (no es obligatorio con ENVIO)
+    if (data.modalidadEntrega === "RETIRO" && data.destinatarioEnvio !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["destinatarioEnvio"],
+        message: "Una venta con retiro no admite destinatario de envío",
       });
     }
 

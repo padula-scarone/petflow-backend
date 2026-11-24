@@ -104,6 +104,7 @@ export async function registrarVenta(input: RegistrarVentaInput): Promise<Regist
       fechaEstimadaPago: venta.fechaEstimadaPago,
       // Lo guardado, no un eco del body: nula con retiro
       direccionEnvio: venta.direccionEnvio,
+      destinatarioEnvio: venta.destinatarioEnvio,
     },
   };
 }
@@ -500,6 +501,8 @@ function convertirVentaDetallada(venta: VentaDetallada): ConsultarVentaResponse[
     modalidadEntrega: venta.modalidadEntrega,
     // Nula con retiro y en las ventas anteriores; el historial (`convertirFilaHistorial`) no la devuelve a propósito
     direccionEnvio: venta.direccionEnvio,
+    // Igual que la dirección: nulo con retiro, si no se indicó y en las ventas anteriores; tampoco va en el historial
+    destinatarioEnvio: venta.destinatarioEnvio,
     // Solo lectura: las ventas anteriores al vínculo con deudores conservan este texto y su `deudor` es nulo
     clienteReferencia: venta.clienteReferencia,
     deudor: venta.deudor,

@@ -69,6 +69,8 @@ export type VentaPersistida = {
   fechaEstimadaPago: string | null;
   /** Dirección de envío releída de la base al guardar; nula con retiro. */
   direccionEnvio: string | null;
+  /** Destinatario del envío releído de la base al guardar; nulo con retiro o si no se indicó. */
+  destinatarioEnvio: string | null;
 };
 
 /** Función de cálculo que inyecta el service; recibe lo leído de la BD (incluido el deudor, si lo hay) y devuelve los totales. */
@@ -195,6 +197,8 @@ export async function registrarVentaAtomica(
         modalidadEntrega: input.modalidadEntrega,
         // El esquema Zod garantiza que existe si y solo si la modalidad es ENVIO (ya viene recortada)
         direccionEnvio: input.direccionEnvio ?? null,
+        // Opcional con ENVIO y ausente con RETIRO (lo garantiza el esquema Zod); ya viene recortado
+        destinatarioEnvio: input.destinatarioEnvio ?? null,
         estado: calculo.estado,
         // `clienteReferencia` ya no se escribe: queda nulo. El deudor es nulo en contado (el esquema no lo admite ahí)
         idDeudor: input.idDeudor ?? null,
@@ -229,7 +233,7 @@ export async function registrarVentaAtomica(
           })),
         },
       },
-      select: { idVenta: true, fechaHora: true, fechaEstimadaPago: true, direccionEnvio: true },
+      select: { idVenta: true, fechaHora: true, fechaEstimadaPago: true, direccionEnvio: true, destinatarioEnvio: true },
     });
 
     // Toda venta emite comprobante al instante (ticket de pago o ticket de deuda).
@@ -253,6 +257,7 @@ export async function registrarVentaAtomica(
       fechaEstimadaPago: fechaCalendarioATexto(venta.fechaEstimadaPago),
       // Lo que devolvió la base, igual que la fecha estimada: el 201 refleja lo guardado y no un eco del body
       direccionEnvio: venta.direccionEnvio,
+      destinatarioEnvio: venta.destinatarioEnvio,
     };
   });
 }
@@ -721,6 +726,7 @@ export async function buscarVentaPorId(idVenta: number): Promise<VentaDetallada 
       modalidadEntrega: true,
       // Solo el detalle la pide: la grilla del historial no la lleva (dato personal). Nula con retiro y en ventas anteriores
       direccionEnvio: true,
+      destinatarioEnvio: true,
       // Obsoleto, pero las ventas anteriores al vínculo con deudores lo conservan
       clienteReferencia: true,
       // En el mismo select de la venta (sin consulta aparte); nulo en contado y en ventas anteriores al vínculo
@@ -786,6 +792,7 @@ export async function buscarVentaPorId(idVenta: number): Promise<VentaDetallada 
     origen: venta.origen,
     modalidadEntrega: venta.modalidadEntrega,
     direccionEnvio: venta.direccionEnvio,
+    destinatarioEnvio: venta.destinatarioEnvio,
     clienteReferencia: venta.clienteReferencia,
     deudor: venta.deudor,
     fechaEstimadaPago: fechaCalendarioATexto(venta.fechaEstimadaPago),

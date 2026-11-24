@@ -220,6 +220,20 @@ const direccionEnvio = {
     "Dato personal: no se devuelve en el historial ni se repite en mensajes de error",
 };
 
+/**
+ * Destinatario del envío de una venta en las respuestas del alta y del detalle. NO se devuelve en el historial (dato personal).
+ * Mismo criterio que `direccionEnvio`; cada respuesta ajusta el final de la descripción.
+ */
+const destinatarioEnvio = {
+  type: "string",
+  nullable: true,
+  maxLength: 100,
+  example: "María Gómez",
+  description:
+    "Nombre de quien recibe el pedido. Es opcional con `modalidadEntrega` ENVIO: nulo si no se indicó, con RETIRO y en las ventas anteriores a que se registrara. " +
+    "Dato personal: no se devuelve en el historial ni se repite en mensajes de error",
+};
+
 /** Respuesta exitosa de `POST /api/ventas` (ver `RegistrarVentaResponse`). */
 const ventaRegistrada = {
   type: "object",
@@ -277,6 +291,10 @@ const ventaRegistrada = {
           ...direccionEnvio,
           description: `${direccionEnvio.description}. Es el texto que quedó guardado, ya recortado (releído de la base)`,
         },
+        destinatarioEnvio: {
+          ...destinatarioEnvio,
+          description: `${destinatarioEnvio.description}. Es el texto que quedó guardado, ya recortado (releído de la base)`,
+        },
       },
       // numeroComprobante nunca es nulo: se emite siempre, incluso en un fiado
       required: [
@@ -289,6 +307,7 @@ const ventaRegistrada = {
         "deudor",
         "fechaEstimadaPago",
         "direccionEnvio",
+        "destinatarioEnvio",
       ],
     },
   },
@@ -472,6 +491,7 @@ const ventaConsultada = {
         origen: { type: "string", enum: ["MOSTRADOR", "DIGITAL"] },
         modalidadEntrega: { type: "string", enum: ["RETIRO", "ENVIO"] },
         direccionEnvio,
+        destinatarioEnvio,
         clienteReferencia: {
           type: "string",
           nullable: true,
@@ -594,6 +614,7 @@ const ventaConsultada = {
         "origen",
         "modalidadEntrega",
         "direccionEnvio",
+        "destinatarioEnvio",
         "clienteReferencia",
         "deudor",
         "fechaEstimadaPago",
@@ -1656,6 +1677,13 @@ const descripcionesParametrosCuentasCorrientes: Record<string, string> = {
   sentido:
     "`asc` o `desc` (en minúsculas). Solo se admite junto con `ordenarPor` (solo, da 400). " +
     `Con \`ordenarPor\` y sin \`sentido\` se usa \`${SENTIDO_ORDEN_PREDETERMINADO}\`.`,
+  proximoPago:
+    "Filtra por `proximaFechaEstimadaPago` (la fecha estimada más temprana entre los fiados pendientes, incluidas las vencidas). " +
+    "Distingue mayúsculas; otro valor, incluido el vacío, da 400. Omitido no filtra. \"Hoy\" es la fecha de Argentina (UTC-3), la misma de `vencido` en la ficha. " +
+    "`hoy`: la fecha es hoy. `estaSemana`: desde hoy hasta el domingo de esta semana (lunes a domingo), ambos inclusive; no incluye vencidas " +
+    "(si hoy es domingo, solo hoy). `vencidos`: la fecha es anterior a hoy. `sinFecha`: tiene fiados pendientes pero ninguno con fecha estimada. " +
+    "Con `proximoPago` solo salen deudores con al menos un fiado pendiente, sin importar `incluirSinDeuda`. " +
+    "Se combina con `texto`, `ordenarPor`, `sentido`, `pagina` y `cantidadPorPagina`; `totalRegistros` y `totalPaginas` reflejan el filtro.",
 };
 
 // Los parámetros se derivan del esquema Zod real, igual que los del historial, para que no se desactualicen
@@ -2038,6 +2066,13 @@ const cuerpoAltaVenta = {
         "Dirección de envío (se recorta; de 1 a 200 caracteres). Obligatoria si `modalidadEntrega` es ENVIO (400 si falta) " +
         "y no se admite con RETIRO (400 si viene). Los mensajes de error nunca repiten su valor",
     },
+    // Igual que la dirección: Zod aporta el tipo y los largos; se suma la regla cruzada con la modalidad (opcional con ENVIO)
+    destinatarioEnvio: {
+      ...((esquemaAltaVenta.properties ?? {}).destinatarioEnvio as object),
+      description:
+        "Nombre de quien recibe el pedido (se recorta; de 1 a 100 caracteres). Opcional con `modalidadEntrega` ENVIO; " +
+        "no se admite con RETIRO (400 si viene). Vacío o de solo espacios es 400. Los mensajes de error nunca repiten su valor",
+    },
   },
 };
 
@@ -2206,6 +2241,7 @@ export const openapiDocument = {
           "`clienteReferencia` ya no forma parte del contrato: si llega se descarta sin error y no se guarda. " +
           "`direccionEnvio` (1 a 200 caracteres) es obligatoria con `modalidadEntrega` ENVIO y no se admite con RETIRO; la respuesta la devuelve tal como quedó guardada (`null` con retiro) " +
           "y `GET /api/ventas/{idVenta}` también. No va en el historial y no se repite en los mensajes de error (dato personal). " +
+          "`destinatarioEnvio` (1 a 100 caracteres, quien recibe el pedido) es opcional con ENVIO y no se admite con RETIRO; se devuelve igual que la dirección (`null` si no se indicó) y con el mismo trato. " +
           "Descuenta stock y congela precio y costo de cada ítem. Los cobros se asocian a la última caja abierta. " +
           "Toda venta, cobrada o fiado, devuelve su `numeroComprobante` (ticket de pago o ticket de deuda). " +
           "El vendedor es el usuario del token: un `idUsuario` en el body se ignora sin error. " +
@@ -2232,6 +2268,7 @@ export const openapiDocument = {
               "Body inválido o regla de negocio incumplida (stock, montos, producto inactivo, descuento sin motivo o motivo sin descuento, " +
               "fiado sin `idDeudor`, venta de contado con `idDeudor` o con `fechaEstimadaPago` no nula, `fechaEstimadaPago` con formato inválido o anterior a hoy, " +
               "envío sin `direccionEnvio`, retiro con `direccionEnvio` o dirección vacía o de más de 200 caracteres, " +
+              "retiro con `destinatarioEnvio` o destinatario vacío o de más de 100 caracteres, " +
               "`montoRecibido` menor al monto final o en un medio que no es efectivo)",
             content: {
               "application/json": { schema: { oneOf: [errorValidacion, errorNegocio] } },
@@ -2264,6 +2301,7 @@ export const openapiDocument = {
           "Devuelve `deudor` con sus cuatro datos, nulo en una venta de contado y en las anteriores al vínculo con deudores " +
           "(que conservan `clienteReferencia`, obsoleto y solo lectura). " +
           "Devuelve `direccionEnvio`, nula con retiro y en las ventas anteriores a que se registrara (el historial no la trae). " +
+          "Devuelve `destinatarioEnvio`, nulo con retiro, si no se indicó y en las ventas anteriores (el historial tampoco lo trae). " +
           "Devuelve `anulacion` (fecha, motivo y usuario que anuló), nula si la venta no está ANULADA o se anuló antes de que se registrara la auditoría. " +
           "Devuelve `fechaHoraServidor` en la raíz, `venta.fechaHoraLimiteModificacion` (nula si está ANULADA) y, por ítem, `cantidadYaDevuelta`. " +
           "Solo lectura: no modifica stock, caja ni estado. Cualquier rol autorizado ve cualquier venta " +
@@ -2745,7 +2783,7 @@ export const openapiDocument = {
           "(el orden alfabético depende de la intercalación de la base). Con `ordenarPor` (y `sentido`) se ordena por esa columna; " +
           "los nulos van siempre al final y el desempate sigue siendo nombre e id ascendentes. " +
           "Cada deudor trae `fiadoDesde` (su fiado pendiente más antiguo) y `proximaFechaEstimadaPago` (la fecha estimada más temprana entre sus fiados pendientes), nulos si no aplican. " +
-          "No hay filtro por próximo pago: lo resuelve el front. `texto` busca por nombre completo (parcial, sin distinguir mayúsculas) o por DNI. " +
+          "`proximoPago` (`hoy`, `estaSemana`, `vencidos` o `sinFecha`) filtra por esa fecha en la base y solo trae deudores con fiados pendientes. `texto` busca por nombre completo (parcial, sin distinguir mayúsculas) o por DNI. " +
           "Una página fuera de rango devuelve 200 con lista vacía y el `totalRegistros` real. La lista y el total salen de la misma foto de la base. " +
           "Solo lectura. Requiere sesión; pueden usarlo los tres roles (VENDEDOR, GESTOR_COMERCIAL y GERENTE) y no exige caja abierta.",
         parameters: parametrosCuentasCorrientes,
@@ -2757,7 +2795,7 @@ export const openapiDocument = {
           "400": {
             description:
               "Parámetros de consulta inválidos (formato, rango, `texto` de más de 100 caracteres, `incluirSinDeuda` distinto de `true` o `false`, " +
-              "`ordenarPor` o `sentido` con un valor no admitido, o `sentido` sin `ordenarPor`)",
+              "`ordenarPor`, `sentido` o `proximoPago` con un valor no admitido (incluido vacío), o `sentido` sin `ordenarPor`)",
             content: { "application/json": { schema: errorValidacionConsulta } },
           },
           ...respuestasProteccion,
