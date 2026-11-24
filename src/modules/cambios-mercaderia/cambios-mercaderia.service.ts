@@ -532,6 +532,8 @@ export async function consultarCambio(consulta: ConsultarCambioInput): Promise<C
  * recién creado), así los dos devuelven exactamente el mismo contenido.
  * Todo el cálculo es con Decimal exacto: el valor de lo entregado se redondea a centavos igual que en el alta
  * y el crédito del devuelto sale de restar el saldo a ese valor.
+ * `ventaVinculada` pasa tal cual lo leído: además del id y el comprobante trae los datos de envío de la venta
+ * (`modalidadEntrega`, `direccionEnvio` y `destinatarioEnvio`), y sigue en `null` si el cambio es aislado.
  * @param cambio Cambio tal como lo entrega el repositorio.
  */
 export function construirDetalleCambio(cambio: CambioDetalleLeido): CambioDetalle {

@@ -1,4 +1,5 @@
 import type { z } from "zod";
+import type { DatosEnvioVenta } from "../../shared/datos-envio-venta.js";
 import type { Decimal } from "../../shared/decimal.js";
 import type { Deudor } from "../deudores/deudores.types.js";
 import type { MedioPagoVigente, PagoCobroCalculado } from "../ventas/ventas.types.js";
@@ -107,10 +108,15 @@ export type PagoDeFiadoLeido = {
   monto: Decimal;
 };
 
-/** Un fiado pendiente con el detalle de sus cobros, para el estado de cuenta. Los cobros ya vienen ordenados por fecha ascendente. */
-export type FiadoConPagosLeido = FiadoLeido & {
-  pagos: PagoDeFiadoLeido[];
-};
+/**
+ * Un fiado pendiente con el detalle de sus cobros y sus datos de envío, para el estado de cuenta. Los cobros ya vienen ordenados
+ * por fecha ascendente. Los datos de envío se suman acá y no en `FiadoLeido`, porque `FiadoLeido` también lo lee el cobro
+ * (que no los necesita).
+ */
+export type FiadoConPagosLeido = FiadoLeido &
+  DatosEnvioVenta & {
+    pagos: PagoDeFiadoLeido[];
+  };
 
 /** Lo que lee el repository para el estado de cuenta: el deudor (o `null` si no existe) y sus fiados pendientes ya ordenados. */
 export type EstadoCuentaLeido = {
@@ -170,7 +176,11 @@ export type PagoDeFiado = {
   monto: string;
 };
 
-/** Un fiado pendiente en el estado de cuenta. Los importes van como texto con 2 decimales. */
+/**
+ * Un fiado pendiente en el estado de cuenta. Los importes van como texto con 2 decimales.
+ * Además de lo propio del fiado trae `modalidadEntrega`, `direccionEnvio` y `destinatarioEnvio` (`DatosEnvioVenta`), con el mismo
+ * formato que `GET /api/ventas/:idVenta`: la dirección y el destinatario son `null` con retiro o si no se cargaron.
+ */
 export type FiadoDeEstadoCuenta = {
   idVenta: number;
   numeroComprobante: string | null;
@@ -194,7 +204,7 @@ export type FiadoDeEstadoCuenta = {
    * La suma de sus `monto` es `yaPagado`. Vacío si todavía no se cobró nada.
    */
   pagos: PagoDeFiado[];
-};
+} & DatosEnvioVenta;
 
 /**
  * Respuesta exitosa de `GET /api/cuentas-corrientes/:idDeudor`. El `saldo` es la suma de los `falta` de `fiados`,
@@ -344,13 +354,13 @@ export type CobroRegistrado = {
 /** Parametro de ruta validado de `GET /api/cuentas-corrientes/cobros/:idCobroDeudor`. */
 export type ConsultarCobroInput = z.infer<typeof consultarCobroSchema>;
 
-/** Un fiado cubierto por un cobro, tal como lo lee el recibo: cuanto de ese cobro se aplico a el. */
+/** Un fiado cubierto por un cobro, tal como lo lee el recibo: cuanto de ese cobro se aplico a el y como se entrega. */
 export type FiadoCobroLeido = {
   idVenta: number;
   numeroComprobante: string | null;
   /** Lo aplicado a este fiado (`detalles_cobro_deudor.monto`). */
   monto: Decimal;
-};
+} & DatosEnvioVenta;
 
 /** Un pago de un cobro, tal como se guardo (recargo o descuento congelado). Todo con Decimal exacto. */
 export type PagoCobroLeido = {
@@ -393,13 +403,17 @@ export type UsuarioDeRecibo = {
   nombre: string;
 };
 
-/** Un fiado cubierto por el cobro en el recibo. El importe va como texto con 2 decimales. */
+/**
+ * Un fiado cubierto por el cobro en el recibo. El importe va como texto con 2 decimales.
+ * Trae también `modalidadEntrega`, `direccionEnvio` y `destinatarioEnvio` (`DatosEnvioVenta`), con el mismo formato que
+ * `GET /api/ventas/:idVenta`: la dirección y el destinatario son `null` con retiro o si no se cargaron.
+ */
 export type FiadoDeRecibo = {
   idVenta: number;
   numeroComprobante: string | null;
   /** Lo aplicado a este fiado en este cobro. */
   montoAbonado: string;
-};
+} & DatosEnvioVenta;
 
 /** Respuesta exitosa (200) de `GET /api/cuentas-corrientes/cobros/:idCobroDeudor`. Los pagos tienen la misma forma que en el 201 del cobro. */
 export type ConsultarCobroResponse = {

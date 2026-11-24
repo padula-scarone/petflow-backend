@@ -225,6 +225,10 @@ export function calcularEstadoCuenta(idDeudor: number, leido: EstadoCuentaLeido,
           monto: formatearImporte(pago.monto),
         }),
       ),
+      // Al final del objeto para no mover los campos existentes; se copian tal cual (nulos con retiro o sin dato cargado)
+      modalidadEntrega: fiado.modalidadEntrega,
+      direccionEnvio: fiado.direccionEnvio,
+      destinatarioEnvio: fiado.destinatarioEnvio,
     };
   });
 
@@ -441,6 +445,10 @@ export function armarReciboCobro(idCobroDeudor: number, cobro: CobroLeido | null
         idVenta: fiado.idVenta,
         numeroComprobante: fiado.numeroComprobante,
         montoAbonado: formatearImporte(fiado.monto),
+        // Al final del objeto para no mover los campos existentes; se copian tal cual (nulos con retiro o sin dato cargado)
+        modalidadEntrega: fiado.modalidadEntrega,
+        direccionEnvio: fiado.direccionEnvio,
+        destinatarioEnvio: fiado.destinatarioEnvio,
       }),
     ),
     pagos: cobro.pagos.map(
