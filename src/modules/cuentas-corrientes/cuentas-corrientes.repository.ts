@@ -1,4 +1,5 @@
 import { Prisma } from "../../generated/prisma/client.js";
+import { SELECCION_DATOS_ENVIO_VENTA } from "../../shared/datos-envio-venta.js";
 import { aDecimal, Decimal } from "../../shared/decimal.js";
 import { fechaCalendarioATexto } from "../../shared/fecha-calendario.js";
 import { prisma } from "../../shared/prisma.js";
@@ -50,9 +51,11 @@ type FiadoLeidoDePrisma = Prisma.VentaGetPayload<{ select: typeof SELECCION_FIAD
  * los muestra. Es una seleccion aparte (y no se amplia la compartida) para que el cobro, que lee los fiados bloqueados, no
  * cargue joins que no necesita. Los cobros van ordenados por fecha ascendente con desempate por id: `monto` sigue siendo lo
  * aplicado a ESTE fiado (`detalles_cobro_deudor`), y la suma de los `monto` es el mismo `yaPagado` de siempre.
+ * Suma ademas los datos de envio de la venta (`SELECCION_DATOS_ENVIO_VENTA`), que el estado de cuenta muestra y el cobro no usa.
  */
 const SELECCION_FIADO_CON_PAGOS = {
   ...SELECCION_FIADO,
+  ...SELECCION_DATOS_ENVIO_VENTA,
   detallesCobroDeudor: {
     orderBy: [{ cobro: { fechaHora: "asc" } }, { idCobroDeudor: "asc" }],
     select: {
@@ -391,6 +394,10 @@ function convertirFiadoLeido(fiado: FiadoLeidoDePrisma): FiadoLeido {
 function convertirFiadoConPagosLeido(fiado: FiadoConPagosDePrisma): FiadoConPagosLeido {
   return {
     ...convertirFiadoLeido(fiado),
+    // Tal como estan guardados: la direccion y el destinatario son nulos con retiro o si no se cargaron
+    modalidadEntrega: fiado.modalidadEntrega,
+    direccionEnvio: fiado.direccionEnvio,
+    destinatarioEnvio: fiado.destinatarioEnvio,
     pagos: fiado.detallesCobroDeudor.map((detalle) => ({
       idCobroDeudor: detalle.idCobroDeudor,
       numeroRecibo: detalle.cobro.numeroRecibo,
@@ -639,7 +646,7 @@ export async function buscarCobroPorId(idCobroDeudor: number): Promise<CobroLeid
         orderBy: { idDetalleCobroDeudor: "asc" },
         select: {
           monto: true,
-          venta: { select: { idVenta: true, numeroComprobante: true } },
+          venta: { select: { idVenta: true, numeroComprobante: true, ...SELECCION_DATOS_ENVIO_VENTA } },
         },
       },
       pagos: {
@@ -671,6 +678,10 @@ export async function buscarCobroPorId(idCobroDeudor: number): Promise<CobroLeid
       idVenta: detalle.venta.idVenta,
       numeroComprobante: detalle.venta.numeroComprobante,
       monto: aDecimal(detalle.monto),
+      // Los datos de envio de la venta, tal como estan guardados (nulos con retiro o si no se cargaron)
+      modalidadEntrega: detalle.venta.modalidadEntrega,
+      direccionEnvio: detalle.venta.direccionEnvio,
+      destinatarioEnvio: detalle.venta.destinatarioEnvio,
     })),
     pagos: cobro.pagos.map((pago) => ({
       idMedioPago: pago.medioPago.idMedioPago,

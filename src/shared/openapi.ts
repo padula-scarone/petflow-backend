@@ -234,6 +234,24 @@ const destinatarioEnvio = {
     "Dato personal: no se devuelve en el historial ni se repite en mensajes de error",
 };
 
+/**
+ * Datos de envío de una venta tal como los muestran las lecturas que traen una venta dentro de otro recurso: los fiados de la
+ * ficha del deudor, los fiados de un recibo de cobro y la venta vinculada a un cambio (ver `DatosEnvioVenta`). Mismos nombres,
+ * tipos y valores nulos que `GET /api/ventas/{idVenta}`. Se agregan al final de cada objeto, después de sus campos de siempre.
+ */
+const datosEnvioVenta = {
+  modalidadEntrega: {
+    type: "string",
+    enum: ["RETIRO", "ENVIO"],
+    description: "Cómo se entrega la venta: `RETIRO` (la retira el cliente) o `ENVIO`",
+  },
+  direccionEnvio,
+  destinatarioEnvio,
+};
+
+/** Campos requeridos de `datosEnvioVenta`: siempre vienen (con `null` si no aplican), igual que en el detalle de la venta. */
+const requeridosDatosEnvioVenta = ["modalidadEntrega", "direccionEnvio", "destinatarioEnvio"];
+
 /** Respuesta exitosa de `POST /api/ventas` (ver `RegistrarVentaResponse`). */
 const ventaRegistrada = {
   type: "object",
@@ -837,7 +855,9 @@ const propiedadesCambioDetalle = {
   ventaVinculada: {
     type: "object",
     nullable: true,
-    description: "Venta original. Nulo si el cambio es desvinculado",
+    description:
+      "Venta original, con sus datos de envío (`modalidadEntrega`, `direccionEnvio` y `destinatarioEnvio`, con el mismo formato que `GET /api/ventas/{idVenta}`). " +
+      "Nulo si el cambio es desvinculado",
     properties: {
       idVenta: { type: "integer", example: 42 },
       numeroComprobante: {
@@ -846,8 +866,10 @@ const propiedadesCambioDetalle = {
         example: "CMP-00000042",
         description: "Nulo solo en datos anteriores al backfill del comprobante",
       },
+      // Datos de envío de la venta vinculada (al final, para no mover los campos existentes)
+      ...datosEnvioVenta,
     },
-    required: ["idVenta", "numeroComprobante"],
+    required: ["idVenta", "numeroComprobante", ...requeridosDatosEnvioVenta],
   },
   articuloDevuelto: {
     type: "object",
@@ -1750,6 +1772,8 @@ const fiadoDeEstadoCuenta = {
         required: ["idCobroDeudor", "numeroRecibo", "fechaHora", "monto"],
       },
     },
+    // Datos de envío de la venta del fiado (al final, para no mover los campos existentes)
+    ...datosEnvioVenta,
   },
   required: [
     "idVenta",
@@ -1761,6 +1785,7 @@ const fiadoDeEstadoCuenta = {
     "yaPagado",
     "falta",
     "pagos",
+    ...requeridosDatosEnvioVenta,
   ],
 };
 
@@ -2022,8 +2047,10 @@ const reciboCobroConsultado = {
           idVenta: { type: "integer", example: 12 },
           numeroComprobante: { type: "string", nullable: true, example: "CMP-00000012" },
           montoAbonado: { type: "string", example: "500.00", description: "Lo aplicado a este fiado en este cobro" },
+          // Datos de envío de la venta del fiado (al final, para no mover los campos existentes)
+          ...datosEnvioVenta,
         },
-        required: ["idVenta", "numeroComprobante", "montoAbonado"],
+        required: ["idVenta", "numeroComprobante", "montoAbonado", ...requeridosDatosEnvioVenta],
       },
     },
     pagos: {
@@ -2515,6 +2542,7 @@ export const openapiDocument = {
           "Un artículo entra (`idProductoDevuelto`) y otro sale (`idProductoEntregado`). Con `idVentaOriginal` el cambio queda vinculado a un ticket; sin él es un cambio aislado. " +
           "Ingresa el stock del devuelto, descuenta el del entregado y registra el cambio en una única transacción. " +
           "El usuario es el del token: un `idUsuario` en el body se ignora sin error. " +
+          "La respuesta trae el mismo cambio completo que el detalle: con ticket vinculado, `ventaVinculada` incluye los datos de envío de esa venta (`modalidadEntrega`, `direccionEnvio` y `destinatarioEnvio`). " +
           `Las cantidades admiten hasta 3 decimales y no pueden superar ${CANTIDAD_MAXIMA}; un producto por unidad exige cantidad entera. ` +
           `**Motivo:** \`motivoCambio\` es obligatorio: texto de 1 a ${MOTIVO_CAMBIO_LONGITUD_MAXIMA} caracteres tras recortar los espacios de los extremos (el front arma el texto a partir del motivo elegido). ` +
           "**Bolsa abierta (`esBolsaAbierta`):** solo si el devuelto es por unidad y tiene un producto a granel activo asociado y un peso unitario cargado " +
@@ -2580,7 +2608,8 @@ export const openapiDocument = {
         security: [{ bearerAuth: [] }],
         summary: "Consultar un cambio de mercadería (detalle)",
         description:
-          "Detalle de un cambio, en cualquier estado. Trae la venta vinculada (nula si es desvinculado), el artículo devuelto y el entregado con su precio unitario y subtotal, " +
+          "Detalle de un cambio, en cualquier estado. Trae la venta vinculada (nula si es desvinculado) con sus datos de envío (`modalidadEntrega`, `direccionEnvio` y `destinatarioEnvio`: " +
+          "los mismos nombres y formato que `GET /api/ventas/{idVenta}`; la dirección y el destinatario son nulos con retiro o si no se cargaron), el artículo devuelto y el entregado con su precio unitario y subtotal, " +
           "el producto que recibió el stock (el devuelto, o el granel si fue bolsa abierta; con la cantidad solo si fue bolsa abierta), " +
           "los valores (`valorDevuelto`, `valorEntregado` y `saldoResultante`), el pago del saldo (`pagoSaldo`: medio, `montoRecibido` y `vuelto`; nulo si no hubo saldo), el vendedor y `anulacion` " +
           "(fecha, usuario y motivo; nula mientras el cambio no esté anulado). `motivoCambio` es nulo en los cambios anteriores a que se registrara, y también lo son `montoRecibido` y `vuelto`. " +
@@ -2624,6 +2653,7 @@ export const openapiDocument = {
           "Un cambio anulado deja de contar en lo ya devuelto del ticket (vuelve a quedar disponible esa cantidad), en `cantidadYaDevuelta` y en `cantidadCambiosActivos` de las ventas, " +
           "y en el historial pasa a figurar con `estado` ANULADO y `fechaHoraLimiteModificacion` nulo. " +
           "Ante dos anulaciones simultáneas del mismo cambio solo una gana y la otra responde 409 `CAMBIO_YA_ANULADO`. " +
+          "La respuesta trae el mismo cambio completo que el detalle, con los datos de envío de la venta vinculada en `ventaVinculada`. " +
           "Todos los errores de negocio y de validación traen `codigo`. " +
           "Orden de evaluación: 400, 404, 409 (ya anulado), 403 (ventana vencida), 409 (sin caja abierta), 409 (stock insuficiente para revertir). " +
           "**Edición ágil (modificar un cambio):** no hay un endpoint aparte. El front anula con este endpoint, consulta el detalle " +
@@ -2809,7 +2839,8 @@ export const openapiDocument = {
         summary: "Consultar el recibo de un cobro",
         description:
           "Devuelve el recibo de un cobro ya registrado: `numeroRecibo` y `fechaHora`, el deudor (id y nombre, sin DNI ni teléfono), " +
-          "el usuario que cobró, los fiados cubiertos (`idVenta`, `numeroComprobante` y lo aplicado a cada uno), los pagos " +
+          "el usuario que cobró, los fiados cubiertos (`idVenta`, `numeroComprobante`, lo aplicado a cada uno y los datos de envío de su venta: " +
+          "`modalidadEntrega`, `direccionEnvio` y `destinatarioEnvio`, nulos la dirección y el destinatario con retiro o si no se cargaron), los pagos " +
           "(medio, monto base, recargo o descuento, monto final, y monto recibido y vuelto si es efectivo) y el `totalCobrado` (suma de los montos finales). " +
           "El `idCobroDeudor` sale de `pagos[]` de la ficha del deudor o del 201 del cobro. " +
           "Los importes salen tal como se guardaron y en texto con 2 decimales. Solo lectura. " +
@@ -2845,6 +2876,7 @@ export const openapiDocument = {
           "Cada fiado trae `fechaEstimadaPago` (`AAAA-MM-DD` o `null`) y `vencido`, calculado al consultar (no se guarda): " +
           "`true` si tiene fecha, es anterior a hoy en hora de Argentina y todavía falta pagar algo. La fecha es solo informativa y no cambia el saldo ni el orden. " +
           "Cada fiado trae `pagos[]`: los cobros aplicados a ese fiado (`idCobroDeudor`, `numeroRecibo`, `fechaHora` y `monto`, que es lo aplicado a ESE fiado), por fecha ascendente; la suma de sus montos es `yaPagado`. " +
+          "Cada fiado trae además `modalidadEntrega`, `direccionEnvio` y `destinatarioEnvio` (los mismos nombres y formato que `GET /api/ventas/{idVenta}`; la dirección y el destinatario son nulos con retiro o si no se cargaron). " +
           "Solo lectura. Requiere sesión; pueden usarlo los tres roles (VENDEDOR, GESTOR_COMERCIAL y GERENTE) y no exige caja abierta.",
         parameters: [parametroIdDeudorEstadoCuenta],
         responses: {

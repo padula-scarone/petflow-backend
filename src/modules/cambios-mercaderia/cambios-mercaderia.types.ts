@@ -1,4 +1,5 @@
 import type { z } from "zod";
+import type { DatosEnvioVenta } from "../../shared/datos-envio-venta.js";
 import type { Decimal } from "../../shared/decimal.js";
 import type { FormatoVenta, ProductoGranelAsociado } from "../inventario/inventario.types.js";
 import type { PaginacionHistorial, TipoMedioPago } from "../ventas/ventas.types.js";
@@ -302,12 +303,14 @@ export type CambioDetalleLeido = {
   estado: EstadoCambioHistorial;
   /** Nulo en los cambios anteriores a que se registrara el motivo. */
   motivoCambio: string | null;
-  /** Venta a la que se vinculó el cambio; nulo si es un cambio aislado. */
-  ventaOriginal: {
-    idVenta: number;
-    /** Nulo solo en datos anteriores al backfill del comprobante. */
-    numeroComprobante: string | null;
-  } | null;
+  /** Venta a la que se vinculó el cambio, con sus datos de envío; nulo si es un cambio aislado. */
+  ventaOriginal:
+    | ({
+        idVenta: number;
+        /** Nulo solo en datos anteriores al backfill del comprobante. */
+        numeroComprobante: string | null;
+      } & DatosEnvioVenta)
+    | null;
   productoDevuelto: {
     idProducto: number;
     nombre: string;
@@ -383,8 +386,11 @@ export type CambioDetalle = {
   fechaHoraLimiteModificacion: string | null;
   /** Nulo en los cambios anteriores a que se registrara el motivo. */
   motivoCambio: string | null;
-  /** Nulo si el cambio es aislado. */
-  ventaVinculada: { idVenta: number; numeroComprobante: string | null } | null;
+  /**
+   * Venta original con sus datos de envío (`modalidadEntrega`, `direccionEnvio` y `destinatarioEnvio`, con el mismo formato que
+   * `GET /api/ventas/:idVenta`). Nulo si el cambio es aislado.
+   */
+  ventaVinculada: ({ idVenta: number; numeroComprobante: string | null } & DatosEnvioVenta) | null;
   articuloDevuelto: ArticuloDevueltoDetalle;
   /** Producto que recibió el stock: el devuelto, o su granel si fue bolsa abierta. */
   productoStockIngresado: {

@@ -1,4 +1,5 @@
 import type { Prisma } from "../../generated/prisma/client.js";
+import { SELECCION_DATOS_ENVIO_VENTA } from "../../shared/datos-envio-venta.js";
 import { aDecimal, Decimal } from "../../shared/decimal.js";
 import { prisma } from "../../shared/prisma.js";
 import {
@@ -563,7 +564,8 @@ async function leerDetalleCambio(transaccion: ClienteTransaccion, idCambio: numb
       fechaHoraAnulacion: true,
       motivoAnulacion: true,
       idVentaOriginal: true,
-      ventaOriginal: { select: { numeroComprobante: true } },
+      // Solo el detalle suma los datos de envío de la venta vinculada; el select de la grilla (historial) no los pide
+      ventaOriginal: { select: { numeroComprobante: true, ...SELECCION_DATOS_ENVIO_VENTA } },
       idProductoDevuelto: true,
       productoDevuelto: { select: { nombre: true, formatoVenta: true } },
       idProductoStockIngresado: true,
@@ -585,10 +587,18 @@ async function leerDetalleCambio(transaccion: ClienteTransaccion, idCambio: numb
     fechaHora: cambio.fechaHora,
     estado: cambio.estado,
     motivoCambio: cambio.motivoCambio,
+    // Con venta vinculada trae sus datos de envío tal como están guardados (nulos con retiro o si no se cargaron).
+    // Sin ella (cambio aislado) sigue en nulo, igual que antes
     ventaOriginal:
-      cambio.idVentaOriginal === null
+      cambio.idVentaOriginal === null || cambio.ventaOriginal === null
         ? null
-        : { idVenta: cambio.idVentaOriginal, numeroComprobante: cambio.ventaOriginal?.numeroComprobante ?? null },
+        : {
+            idVenta: cambio.idVentaOriginal,
+            numeroComprobante: cambio.ventaOriginal.numeroComprobante,
+            modalidadEntrega: cambio.ventaOriginal.modalidadEntrega,
+            direccionEnvio: cambio.ventaOriginal.direccionEnvio,
+            destinatarioEnvio: cambio.ventaOriginal.destinatarioEnvio,
+          },
     productoDevuelto: {
       idProducto: cambio.idProductoDevuelto,
       nombre: cambio.productoDevuelto.nombre,
