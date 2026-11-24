@@ -14,8 +14,10 @@ import {
 } from "../modules/cambios-mercaderia/cambios-mercaderia.schemas.js";
 import { CODIGOS_ERROR_COBRO } from "../modules/cuentas-corrientes/cuentas-corrientes.errors.js";
 import {
+  consultarCobroSchema,
   consultarCuentasCorrientesSchema,
   consultarEstadoCuentaSchema,
+  ID_COBRO_DEUDOR_MAXIMO,
   registrarCobroCuerpoSchema,
   registrarCobroParametrosSchema,
   SENTIDO_ORDEN_PREDETERMINADO,
@@ -1805,8 +1807,14 @@ function crearEsquemaErrorConCodigo(codigo: string, mensajeEjemplo: string) {
 }
 
 /** Los códigos del cobro vienen del enum real del servicio: si se agrega uno y no se documenta, falla al cargar (no en producción). */
-const [CODIGO_FIADO_NO_ENCONTRADO, CODIGO_FIADO_NO_PENDIENTE, CODIGO_MONTO_EXCEDE_FALTA, CODIGO_SIN_CAJA_ABIERTA, CODIGO_COBRO_SIMULTANEO] =
-  CODIGOS_ERROR_COBRO;
+const [
+  CODIGO_FIADO_NO_ENCONTRADO,
+  CODIGO_FIADO_NO_PENDIENTE,
+  CODIGO_MONTO_EXCEDE_FALTA,
+  CODIGO_SIN_CAJA_ABIERTA,
+  CODIGO_COBRO_SIMULTANEO,
+  CODIGO_COBRO_NO_ENCONTRADO,
+] = CODIGOS_ERROR_COBRO;
 
 /** 404 del cobro: el deudor no existe, o un `idVenta` no existe o no es un fiado de ese deudor. */
 const fiadoODeudorInexistente = {
@@ -1914,6 +1922,91 @@ const cobroDeudorRegistrado = {
     saldoDeudorDespues: { type: "string", example: "1000.00", description: "Lo que debe el deudor después del cobro, con la misma fórmula de su estado de cuenta" },
   },
   required: ["exito", "cobro", "deudor", "fiados", "pagos", "totalAbonado", "totalCobrado", "saldoDeudorDespues"],
+};
+
+// --- RECIBO DE UN COBRO ---
+
+// El parámetro de ruta se deriva del esquema Zod real, igual que el resto, para que no se desactualice
+const esquemaConsultaCobro = z.toJSONSchema(consultarCobroSchema, { io: "input", target: "draft-7" });
+const parametroIdCobroDeudor = {
+  name: "idCobroDeudor",
+  in: "path",
+  required: true,
+  description: `Id del cobro: entero positivo (máximo ${ID_COBRO_DEUDOR_MAXIMO}), por ejemplo el \`idCobroDeudor\` de un pago de la ficha del deudor o del 201 del cobro.`,
+  schema: (esquemaConsultaCobro.properties ?? {}).idCobroDeudor,
+};
+
+/** Error de validación (400) del id de ruta del recibo: mismo formato que el resto, con el campo propio de la ruta. */
+const errorValidacionConsultaCobro = {
+  ...errorValidacion,
+  properties: {
+    ...errorValidacion.properties,
+    mensaje: { type: "string", example: "Parámetros de ruta inválidos" },
+    errores: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          campo: { type: "string", example: "idCobroDeudor" },
+          mensaje: { type: "string", example: "Debe ser un entero sin signo, sin espacios ni notación científica" },
+        },
+      },
+    },
+  },
+};
+
+/** 404 del recibo: el cobro no existe. El mensaje lleva solo el id. */
+const cobroInexistente = crearEsquemaErrorConCodigo(CODIGO_COBRO_NO_ENCONTRADO, "El cobro 999 no existe");
+
+/**
+ * Respuesta exitosa (200) de `GET /api/cuentas-corrientes/cobros/{idCobroDeudor}` (ver `ConsultarCobroResponse`).
+ * `cobro` y `pagos` son los mismos del 201 del cobro (se reutilizan para que no diverjan); el deudor no trae DNI ni teléfono.
+ */
+const reciboCobroConsultado = {
+  type: "object",
+  properties: {
+    exito: { type: "boolean", example: true },
+    cobro: cobroDeudorRegistrado.properties.cobro,
+    deudor: {
+      type: "object",
+      description: "Deudor del cobro: solo id y nombre (sin DNI ni teléfono)",
+      properties: {
+        idDeudor: { type: "integer", example: 7 },
+        nombreCompleto: { type: "string", example: "Prueba Uno" },
+      },
+      required: ["idDeudor", "nombreCompleto"],
+    },
+    usuario: {
+      type: "object",
+      description: "Quien registró el cobro",
+      properties: {
+        idUsuario: { type: "integer", example: 1 },
+        nombre: { type: "string", example: "Vendedor Demo" },
+      },
+      required: ["idUsuario", "nombre"],
+    },
+    fiados: {
+      type: "array",
+      description: "Los fiados que cubrió el cobro, en el orden en que se pidieron",
+      items: {
+        type: "object",
+        properties: {
+          idVenta: { type: "integer", example: 12 },
+          numeroComprobante: { type: "string", nullable: true, example: "CMP-00000012" },
+          montoAbonado: { type: "string", example: "500.00", description: "Lo aplicado a este fiado en este cobro" },
+        },
+        required: ["idVenta", "numeroComprobante", "montoAbonado"],
+      },
+    },
+    pagos: {
+      ...cobroDeudorRegistrado.properties.pagos,
+      description:
+        "Cómo se pagó el cobro, en el orden en que se pidió. `porcentajeAplicado` es el recargo (positivo) o descuento (negativo) congelado en el cobro; " +
+        "su importe es `montoFinal - montoBase`. `montoRecibido` y `vuelto` solo existen si el medio es efectivo y se informó el recibido",
+    },
+    totalCobrado: { type: "string", example: "500.00", description: "Suma de los montos finales: lo que pagó el cliente, con los recargos o descuentos" },
+  },
+  required: ["exito", "cobro", "deudor", "usuario", "fiados", "pagos", "totalCobrado"],
 };
 
 // --- CUERPO DEL ALTA DE VENTA ---
@@ -2666,6 +2759,37 @@ export const openapiDocument = {
               "Parámetros de consulta inválidos (formato, rango, `texto` de más de 100 caracteres, `incluirSinDeuda` distinto de `true` o `false`, " +
               "`ordenarPor` o `sentido` con un valor no admitido, o `sentido` sin `ordenarPor`)",
             content: { "application/json": { schema: errorValidacionConsulta } },
+          },
+          ...respuestasProteccion,
+        },
+      },
+    },
+    "/api/cuentas-corrientes/cobros/{idCobroDeudor}": {
+      get: {
+        tags: ["Ventas"],
+        security: [{ bearerAuth: [] }],
+        summary: "Consultar el recibo de un cobro",
+        description:
+          "Devuelve el recibo de un cobro ya registrado: `numeroRecibo` y `fechaHora`, el deudor (id y nombre, sin DNI ni teléfono), " +
+          "el usuario que cobró, los fiados cubiertos (`idVenta`, `numeroComprobante` y lo aplicado a cada uno), los pagos " +
+          "(medio, monto base, recargo o descuento, monto final, y monto recibido y vuelto si es efectivo) y el `totalCobrado` (suma de los montos finales). " +
+          "El `idCobroDeudor` sale de `pagos[]` de la ficha del deudor o del 201 del cobro. " +
+          "Los importes salen tal como se guardaron y en texto con 2 decimales. Solo lectura. " +
+          "Requiere sesión; pueden usarlo los tres roles (VENDEDOR, GESTOR_COMERCIAL y GERENTE) y no exige caja abierta. " +
+          "No choca con `GET /api/cuentas-corrientes/{idDeudor}`: esa ruta tiene un solo segmento.",
+        parameters: [parametroIdCobroDeudor],
+        responses: {
+          "200": {
+            description: "Recibo del cobro",
+            content: { "application/json": { schema: reciboCobroConsultado } },
+          },
+          "400": {
+            description: "`idCobroDeudor` inválido (no es un entero positivo)",
+            content: { "application/json": { schema: errorValidacionConsultaCobro } },
+          },
+          "404": {
+            description: "El cobro no existe (`COBRO_NO_ENCONTRADO`)",
+            content: { "application/json": { schema: cobroInexistente } },
           },
           ...respuestasProteccion,
         },

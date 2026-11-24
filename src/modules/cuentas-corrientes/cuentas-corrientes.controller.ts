@@ -2,12 +2,18 @@ import type { Request, Response } from "express";
 import type { SesionAutenticada } from "../auth/auth.types.js";
 import { esErrorNegocio, esErrorNegocioConCodigo } from "../ventas/ventas.errors.js";
 import {
+  consultarCobroSchema,
   consultarCuentasCorrientesSchema,
   consultarEstadoCuentaSchema,
   registrarCobroCuerpoSchema,
   registrarCobroParametrosSchema,
 } from "./cuentas-corrientes.schemas.js";
-import { consultarCuentasCorrientes, consultarEstadoCuenta, registrarCobro } from "./cuentas-corrientes.service.js";
+import {
+  consultarCobro,
+  consultarCuentasCorrientes,
+  consultarEstadoCuenta,
+  registrarCobro,
+} from "./cuentas-corrientes.service.js";
 
 // --- FUNCIONES AUXILIARES ---
 
@@ -38,7 +44,7 @@ function construirRespuestaValidacion(mensaje: string, incidencias: ReadonlyArra
 /**
  * Responde un error de negocio con su código HTTP y su mensaje.
  * Los que traen `codigo` lo suman (`DEUDOR_NO_ENCONTRADO`, `FIADO_NO_ENCONTRADO`, `FIADO_NO_PENDIENTE`, `MONTO_EXCEDE_FALTA`,
- * `SIN_CAJA_ABIERTA`, `COBRO_SIMULTANEO`); cualquier otro mantiene el formato de ventas (por ejemplo los 400 de los pagos).
+ * `SIN_CAJA_ABIERTA`, `COBRO_SIMULTANEO`, `COBRO_NO_ENCONTRADO`); cualquier otro mantiene el formato de ventas (por ejemplo los 400 de los pagos).
  * Copia local de la de ventas y deudores (deuda registrada).
  * @returns `true` si el valor era un error de negocio y ya se respondió; `false` si hay que relanzarlo.
  */
@@ -149,6 +155,32 @@ export async function postRegistrarCobro(req: Request, res: Response): Promise<v
       idUsuario: sesion.idUsuario,
     });
     res.status(201).json(resultado);
+  } catch (errorCapturado) {
+    if (responderErrorNegocio(res, errorCapturado)) {
+      return;
+    }
+    throw errorCapturado;
+  }
+}
+
+/**
+ * Handler de `GET /api/cuentas-corrientes/cobros/:idCobroDeudor`: recibo de un cobro ya registrado.
+ * Valida el parámetro de ruta y delega en el service. No contiene reglas de negocio ni exige caja abierta.
+ * La sesión y el rol los exige `requerirRol` en la ruta, no este handler.
+ * Respuestas: 200 con el recibo (deudor con id y nombre, usuario que cobró, fiados cubiertos, pagos y total cobrado);
+ * 400 con detalle por parámetro si `idCobroDeudor` es inválido; 404 `COBRO_NO_ENCONTRADO` si el cobro no existe.
+ */
+export async function getConsultarCobro(req: Request, res: Response): Promise<void> {
+  // El parámetro de ruta llega como texto: el esquema lo convierte de forma estricta
+  const parseo = consultarCobroSchema.safeParse(req.params);
+  if (!parseo.success) {
+    res.status(400).json(construirRespuestaValidacion("Parámetros de ruta inválidos", parseo.error.issues));
+    return;
+  }
+
+  try {
+    const resultado = await consultarCobro(parseo.data);
+    res.status(200).json(resultado);
   } catch (errorCapturado) {
     if (responderErrorNegocio(res, errorCapturado)) {
       return;

@@ -80,6 +80,19 @@ export const consultarEstadoCuentaSchema = z.object({
   idDeudor: enteroDesdeTexto(1, ID_DEUDOR_MAXIMO),
 });
 
+// ===== RECIBO DE UN COBRO =====
+
+/** Tope de `idCobroDeudor`: maximo de una columna integer de PostgreSQL (mas alla, la base fallaria con 500 en lugar de dar 404). */
+export const ID_COBRO_DEUDOR_MAXIMO = 2_147_483_647;
+
+/**
+ * Contrato de entrada del parametro de ruta de `GET /api/cuentas-corrientes/cobros/:idCobroDeudor`.
+ * El id llega como texto y la conversion es estricta (entero positivo hasta `ID_COBRO_DEUDOR_MAXIMO`).
+ */
+export const consultarCobroSchema = z.object({
+  idCobroDeudor: enteroDesdeTexto(1, ID_COBRO_DEUDOR_MAXIMO),
+});
+
 // ===== COBRO DE FIADOS DE UN DEUDOR =====
 
 /**

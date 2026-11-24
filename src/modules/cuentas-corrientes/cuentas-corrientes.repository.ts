@@ -11,6 +11,7 @@ import {
 import type {
   CampoOrdenCuentasCorrientes,
   CobroCalculado,
+  CobroLeido,
   CobroRegistrado,
   EstadoCuentaLeido,
   FilaCuentaCorriente,
@@ -583,4 +584,76 @@ export async function registrarCobroAtomico(input: RegistrarCobroInput, calcular
     }
     throw errorCapturado;
   }
+}
+
+// ===== RECIBO DE UN COBRO =====
+
+/**
+ * Busca un cobro de deudor por id con todo lo que muestra su recibo: el deudor (solo id y nombre), el usuario que cobro,
+ * los fiados cubiertos con lo aplicado a cada uno y los pagos con su medio. Es solo lectura.
+ * Una sola consulta con `select` anidado (sin consulta por fila) y SIN transaccion de solo lectura: un cobro es inmutable
+ * (no existe la anulacion de cobros y nadie modifica sus detalles ni sus pagos), asi que no hay una segunda escritura que pueda
+ * mostrar una foto mezclada. Si algun dia se pudiera anular o corregir un cobro, esta lectura debera pasar a `RepeatableRead`.
+ * El `select` pide solo lo que el contrato devuelve: nunca el DNI ni el telefono del deudor (RNF-VENTAS-03).
+ * Fiados y pagos van ordenados por su id: es el orden en que se guardaron, que es el orden en que se pidieron.
+ * @param idCobroDeudor Id del cobro, ya validado.
+ * @returns El cobro, o `null` si no existe (el service decide el 404).
+ */
+export async function buscarCobroPorId(idCobroDeudor: number): Promise<CobroLeido | null> {
+  const cobro = await prisma.cobroDeudor.findUnique({
+    where: { idCobroDeudor },
+    select: {
+      idCobroDeudor: true,
+      numeroRecibo: true,
+      fechaHora: true,
+      deudor: { select: { idDeudor: true, nombreCompleto: true } },
+      usuario: { select: { idUsuario: true, nombre: true } },
+      detalles: {
+        orderBy: { idDetalleCobroDeudor: "asc" },
+        select: {
+          monto: true,
+          venta: { select: { idVenta: true, numeroComprobante: true } },
+        },
+      },
+      pagos: {
+        orderBy: { idPagoCobroDeudor: "asc" },
+        select: {
+          montoBase: true,
+          porcentajeAplicado: true,
+          montoFinal: true,
+          montoRecibido: true,
+          vuelto: true,
+          medioPago: { select: { idMedioPago: true, nombre: true } },
+        },
+      },
+    },
+  });
+
+  if (cobro === null) {
+    return null;
+  }
+
+  // Lo leido (Decimal de Prisma) se pasa al Decimal aislado para que el service calcule con aritmetica exacta
+  return {
+    idCobroDeudor: cobro.idCobroDeudor,
+    numeroRecibo: cobro.numeroRecibo,
+    fechaHora: cobro.fechaHora,
+    deudor: cobro.deudor,
+    usuario: cobro.usuario,
+    fiados: cobro.detalles.map((detalle) => ({
+      idVenta: detalle.venta.idVenta,
+      numeroComprobante: detalle.venta.numeroComprobante,
+      monto: aDecimal(detalle.monto),
+    })),
+    pagos: cobro.pagos.map((pago) => ({
+      idMedioPago: pago.medioPago.idMedioPago,
+      nombreMedioPago: pago.medioPago.nombre,
+      montoBase: aDecimal(pago.montoBase),
+      porcentajeAplicado: aDecimal(pago.porcentajeAplicado),
+      montoFinal: aDecimal(pago.montoFinal),
+      // Nulos si el medio no es efectivo o no se informo el recibido
+      montoRecibido: pago.montoRecibido === null ? null : aDecimal(pago.montoRecibido),
+      vuelto: pago.vuelto === null ? null : aDecimal(pago.vuelto),
+    })),
+  };
 }

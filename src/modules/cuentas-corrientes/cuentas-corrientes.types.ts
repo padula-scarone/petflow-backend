@@ -3,6 +3,7 @@ import type { Decimal } from "../../shared/decimal.js";
 import type { Deudor } from "../deudores/deudores.types.js";
 import type { MedioPagoVigente, PagoCobroCalculado } from "../ventas/ventas.types.js";
 import type {
+  consultarCobroSchema,
   consultarCuentasCorrientesSchema,
   consultarEstadoCuentaSchema,
   registrarCobroCuerpoSchema,
@@ -319,4 +320,83 @@ export type RegistrarCobroResponse = {
 export type CobroRegistrado = {
   calculo: CobroCalculado;
   persistido: CobroPersistido;
+};
+
+// ===== RECIBO DE UN COBRO: ENTRADA Y DATOS DE LA BASE =====
+
+/** Parametro de ruta validado de `GET /api/cuentas-corrientes/cobros/:idCobroDeudor`. */
+export type ConsultarCobroInput = z.infer<typeof consultarCobroSchema>;
+
+/** Un fiado cubierto por un cobro, tal como lo lee el recibo: cuanto de ese cobro se aplico a el. */
+export type FiadoCobroLeido = {
+  idVenta: number;
+  numeroComprobante: string | null;
+  /** Lo aplicado a este fiado (`detalles_cobro_deudor.monto`). */
+  monto: Decimal;
+};
+
+/** Un pago de un cobro, tal como se guardo (recargo o descuento congelado). Todo con Decimal exacto. */
+export type PagoCobroLeido = {
+  idMedioPago: number;
+  /** Nombre vigente del medio de pago al consultar. */
+  nombreMedioPago: string;
+  montoBase: Decimal;
+  /** Recargo (positivo) o descuento (negativo) que se aplico en ese cobro. */
+  porcentajeAplicado: Decimal;
+  montoFinal: Decimal;
+  /** Nulo si el medio no es efectivo o no se informo el monto recibido. */
+  montoRecibido: Decimal | null;
+  /** Nulo siempre que `montoRecibido` sea nulo. */
+  vuelto: Decimal | null;
+};
+
+/** Cobro completo con su deudor, usuario, fiados y pagos, tal como lo entrega el repository. Sin DNI ni telefono del deudor. */
+export type CobroLeido = {
+  idCobroDeudor: number;
+  /** Se asigna en la misma transaccion que crea el cobro, pero la columna es nullable: se informa tal cual esta guardada. */
+  numeroRecibo: string | null;
+  fechaHora: Date;
+  deudor: DeudorDeRecibo;
+  /** Quien registro el cobro (el usuario de la sesion de ese momento). */
+  usuario: UsuarioDeRecibo;
+  /** En el orden en que se guardaron (el mismo en que se pidieron). */
+  fiados: FiadoCobroLeido[];
+  /** En el orden en que se guardaron (el mismo en que se pidieron). */
+  pagos: PagoCobroLeido[];
+};
+
+// ===== RECIBO DE UN COBRO: RESPUESTA HTTP =====
+
+/** Deudor reducido a lo que muestra el recibo: sin DNI ni telefono (RNF-VENTAS-03). */
+export type DeudorDeRecibo = Pick<Deudor, "idDeudor" | "nombreCompleto">;
+
+/** Usuario que registro el cobro. */
+export type UsuarioDeRecibo = {
+  idUsuario: number;
+  nombre: string;
+};
+
+/** Un fiado cubierto por el cobro en el recibo. El importe va como texto con 2 decimales. */
+export type FiadoDeRecibo = {
+  idVenta: number;
+  numeroComprobante: string | null;
+  /** Lo aplicado a este fiado en este cobro. */
+  montoAbonado: string;
+};
+
+/** Respuesta exitosa (200) de `GET /api/cuentas-corrientes/cobros/:idCobroDeudor`. Los pagos tienen la misma forma que en el 201 del cobro. */
+export type ConsultarCobroResponse = {
+  exito: true;
+  cobro: {
+    idCobroDeudor: number;
+    numeroRecibo: string | null;
+    /** Instante del cobro en ISO 8601. */
+    fechaHora: string;
+  };
+  deudor: DeudorDeRecibo;
+  usuario: UsuarioDeRecibo;
+  fiados: FiadoDeRecibo[];
+  pagos: PagoDeCobro[];
+  /** Suma de los montos finales de los pagos: lo que pago el cliente, con los recargos o descuentos de los medios. */
+  totalCobrado: string;
 };
