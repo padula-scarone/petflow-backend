@@ -18,6 +18,18 @@ import {
 /** Largo máximo de `texto`: el mismo que `busqueda` de deudores y `textoCliente` del historial (columna VARCHAR(100)). */
 export const TEXTO_BUSQUEDA_LONGITUD_MAXIMA = 100;
 
+/**
+ * Columnas por las que se puede ordenar el listado, con los nombres que usa el front.
+ * Es una lista cerrada a propósito: el repository la traduce a fragmentos de SQL fijos (nunca se arma SQL con el texto recibido).
+ */
+export const CAMPOS_ORDEN_CUENTAS_CORRIENTES = ["nombre", "fiadosPendientes", "saldo", "fechaFiado", "proximoPago"] as const;
+
+/** Sentidos del orden, en minúsculas estrictas (`ASC` da 400, igual que los demás enumerados de las queries). */
+export const SENTIDOS_ORDEN_CUENTAS_CORRIENTES = ["asc", "desc"] as const;
+
+/** Sentido que se aplica cuando llega `ordenarPor` sin `sentido`. */
+export const SENTIDO_ORDEN_PREDETERMINADO = "asc";
+
 // --- AUXILIARES ---
 
 /**
@@ -35,13 +47,28 @@ const booleanoDesdeTexto = z
  * Los valores llegan como texto; la conversión a número es estricta (ver `enteroDesdeTexto` de ventas).
  * `texto` coincide de forma parcial, sin distinguir mayúsculas, con el nombre o el DNI; si queda vacío tras el recorte
  * equivale a no filtrar (lo resuelve el service). `incluirSinDeuda` vale `false` si se omite: solo salen los deudores con saldo.
+ * `ordenarPor` y `sentido` son opcionales; sin ellos el orden es el de siempre (saldo descendente). `sentido` sin `ordenarPor`
+ * es 400: ignorarlo en silencio haría creer al front que ordenó. Con `ordenarPor` y sin `sentido` se usa `SENTIDO_ORDEN_PREDETERMINADO`
+ * (lo resuelve el service).
  */
-export const consultarCuentasCorrientesSchema = z.object({
-  pagina: enteroDesdeTexto(1, PAGINA_MAXIMA).default(1),
-  cantidadPorPagina: enteroDesdeTexto(1, CANTIDAD_POR_PAGINA_MAXIMA).default(CANTIDAD_POR_PAGINA_PREDETERMINADA),
-  texto: z.string().trim().max(TEXTO_BUSQUEDA_LONGITUD_MAXIMA).optional(),
-  incluirSinDeuda: booleanoDesdeTexto.default(false),
-});
+export const consultarCuentasCorrientesSchema = z
+  .object({
+    pagina: enteroDesdeTexto(1, PAGINA_MAXIMA).default(1),
+    cantidadPorPagina: enteroDesdeTexto(1, CANTIDAD_POR_PAGINA_MAXIMA).default(CANTIDAD_POR_PAGINA_PREDETERMINADA),
+    texto: z.string().trim().max(TEXTO_BUSQUEDA_LONGITUD_MAXIMA).optional(),
+    incluirSinDeuda: booleanoDesdeTexto.default(false),
+    ordenarPor: z.enum(CAMPOS_ORDEN_CUENTAS_CORRIENTES).optional(),
+    sentido: z.enum(SENTIDOS_ORDEN_CUENTAS_CORRIENTES).optional(),
+  })
+  .superRefine((consulta, contexto) => {
+    if (consulta.sentido !== undefined && consulta.ordenarPor === undefined) {
+      contexto.addIssue({
+        code: "custom",
+        path: ["sentido"],
+        message: "El sentido requiere indicar ordenarPor",
+      });
+    }
+  });
 
 // --- ESTADO DE CUENTA DE UN DEUDOR ---
 

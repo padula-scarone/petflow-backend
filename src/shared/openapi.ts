@@ -18,6 +18,7 @@ import {
   consultarEstadoCuentaSchema,
   registrarCobroCuerpoSchema,
   registrarCobroParametrosSchema,
+  SENTIDO_ORDEN_PREDETERMINADO,
   TEXTO_BUSQUEDA_LONGITUD_MAXIMA as TEXTO_CUENTAS_CORRIENTES_LONGITUD_MAXIMA,
 } from "../modules/cuentas-corrientes/cuentas-corrientes.schemas.js";
 import { CODIGOS_ERROR_DEUDOR } from "../modules/deudores/deudores.errors.js";
@@ -1594,8 +1595,24 @@ const cuentaCorrienteListada = {
       description: "Lo que el deudor debe hoy: suma de lo que falta pagar de sus fiados pendientes (`0.00` si no tiene ninguno)",
     },
     cantidadFiadosPendientes: { type: "integer", example: 2, description: "Cantidad de fiados `PENDIENTE_PAGO` del deudor" },
+    fiadoDesde: {
+      type: "string",
+      format: "date-time",
+      nullable: true,
+      example: "2026-10-30T15:20:00.000Z",
+      description: "`fechaHora` (ISO 8601) del fiado `PENDIENTE_PAGO` más antiguo del deudor. Nulo si no tiene fiados pendientes",
+    },
+    proximaFechaEstimadaPago: {
+      type: "string",
+      format: "date",
+      nullable: true,
+      example: "2026-12-15",
+      description:
+        "La `fechaEstimadaPago` (`AAAA-MM-DD`, sin hora) más temprana entre los fiados pendientes del deudor; incluye las ya vencidas. " +
+        "Nula si ninguno tiene fecha. Es solo informativa",
+    },
   },
-  required: ["idDeudor", "nombreCompleto", "dni", "saldo", "cantidadFiadosPendientes"],
+  required: ["idDeudor", "nombreCompleto", "dni", "saldo", "cantidadFiadosPendientes", "fiadoDesde", "proximaFechaEstimadaPago"],
 };
 
 /** Respuesta exitosa de `GET /api/cuentas-corrientes` (ver `ConsultarCuentasCorrientesResponse`). */
@@ -1629,6 +1646,14 @@ const descripcionesParametrosCuentasCorrientes: Record<string, string> = {
   incluirSinDeuda:
     "`true` o `false` (en minúsculas; cualquier otro valor da 400). Por defecto `false`: solo se listan los deudores con saldo mayor a 0. " +
     "Con `true` se suman los que no deben (saldo `0.00`).",
+  ordenarPor:
+    "Columna del orden: `nombre`, `fiadosPendientes`, `saldo`, `fechaFiado` (el fiado pendiente más antiguo) o `proximoPago` " +
+    "(la fecha estimada de pago más temprana). Distingue mayúsculas; otro valor da 400. Sin `ordenarPor` el orden es el de siempre: saldo descendente. " +
+    "Los nulos (deudores sin fiados pendientes o sin fecha estimada) van siempre al final, con `asc` y con `desc`. " +
+    "El desempate es siempre nombre ascendente y luego id ascendente.",
+  sentido:
+    "`asc` o `desc` (en minúsculas). Solo se admite junto con `ordenarPor` (solo, da 400). " +
+    `Con \`ordenarPor\` y sin \`sentido\` se usa \`${SENTIDO_ORDEN_PREDETERMINADO}\`.`,
 };
 
 // Los parámetros se derivan del esquema Zod real, igual que los del historial, para que no se desactualicen
@@ -2593,8 +2618,11 @@ export const openapiDocument = {
           "Cuenta corriente de los deudores: por cada uno, lo que debe hoy y cuántos fiados pendientes tiene. " +
           "El saldo no se guarda: es la suma de lo que falta pagar (importe adeudado menos lo ya abonado) de sus fiados `PENDIENTE_PAGO`; " +
           "las ventas `COMPLETADA` y `ANULADA` no cuentan. Por defecto solo salen los deudores con saldo mayor a 0; `incluirSinDeuda=true` suma los de saldo 0. " +
-          "**Orden fijo:** saldo descendente, desempate por nombre completo ascendente y luego por id ascendente " +
-          "(el orden alfabético depende de la intercalación de la base). `texto` busca por nombre completo (parcial, sin distinguir mayúsculas) o por DNI. " +
+          "**Orden:** sin parámetros, saldo descendente, desempate por nombre completo ascendente y luego por id ascendente " +
+          "(el orden alfabético depende de la intercalación de la base). Con `ordenarPor` (y `sentido`) se ordena por esa columna; " +
+          "los nulos van siempre al final y el desempate sigue siendo nombre e id ascendentes. " +
+          "Cada deudor trae `fiadoDesde` (su fiado pendiente más antiguo) y `proximaFechaEstimadaPago` (la fecha estimada más temprana entre sus fiados pendientes), nulos si no aplican. " +
+          "No hay filtro por próximo pago: lo resuelve el front. `texto` busca por nombre completo (parcial, sin distinguir mayúsculas) o por DNI. " +
           "Una página fuera de rango devuelve 200 con lista vacía y el `totalRegistros` real. La lista y el total salen de la misma foto de la base. " +
           "Solo lectura. Requiere sesión; pueden usarlo los tres roles (VENDEDOR, GESTOR_COMERCIAL y GERENTE) y no exige caja abierta.",
         parameters: parametrosCuentasCorrientes,
@@ -2604,7 +2632,9 @@ export const openapiDocument = {
             content: { "application/json": { schema: cuentasCorrientesConsultadas } },
           },
           "400": {
-            description: "Parámetros de consulta inválidos (formato, rango, `texto` de más de 100 caracteres o `incluirSinDeuda` distinto de `true` o `false`)",
+            description:
+              "Parámetros de consulta inválidos (formato, rango, `texto` de más de 100 caracteres, `incluirSinDeuda` distinto de `true` o `false`, " +
+              "`ordenarPor` o `sentido` con un valor no admitido, o `sentido` sin `ordenarPor`)",
             content: { "application/json": { schema: errorValidacionConsulta } },
           },
           ...respuestasProteccion,

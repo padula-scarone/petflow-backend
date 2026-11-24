@@ -20,6 +20,7 @@ import {
   buscarPaginaCuentasCorrientes,
   registrarCobroAtomico,
 } from "./cuentas-corrientes.repository.js";
+import { SENTIDO_ORDEN_PREDETERMINADO } from "./cuentas-corrientes.schemas.js";
 import type {
   CobroCalculado,
   CobroRegistrado,
@@ -36,6 +37,7 @@ import type {
   FiadoLeido,
   FiltroCuentasCorrientes,
   LecturaCobro,
+  OrdenCuentasCorrientes,
   PagoDeCobro,
   RegistrarCobroInput,
   RegistrarCobroResponse,
@@ -51,17 +53,34 @@ function formatearImporte(importe: Decimal): string {
 // --- LISTADO DE DEUDORES CON SALDO ---
 
 /**
+ * Resuelve el orden pedido en la query. Sin `ordenarPor` no hay orden pedido (`undefined`): el repository aplica el de siempre.
+ * Con `ordenarPor` y sin `sentido` se usa `SENTIDO_ORDEN_PREDETERMINADO`. Que `sentido` no llegue solo ya lo rechazó el esquema.
+ * @param consulta Query ya validada por Zod.
+ */
+export function calcularOrdenCuentasCorrientes(consulta: ConsultarCuentasCorrientesInput): OrdenCuentasCorrientes | undefined {
+  if (consulta.ordenarPor === undefined) {
+    return undefined;
+  }
+  return { campo: consulta.ordenarPor, sentido: consulta.sentido ?? SENTIDO_ORDEN_PREDETERMINADO };
+}
+
+/**
  * Traduce la query al filtro del repository. Un texto vacío tras el recorte equivale a no filtrar
  * (el front lo manda así cuando el campo está limpio), igual que `textoCliente` en el historial de ventas.
  */
 export function calcularFiltroCuentasCorrientes(consulta: ConsultarCuentasCorrientesInput): FiltroCuentasCorrientes {
+  const orden = calcularOrdenCuentasCorrientes(consulta);
   return {
     incluirSinDeuda: consulta.incluirSinDeuda,
     ...(consulta.texto !== undefined && consulta.texto !== "" ? { texto: consulta.texto } : {}),
+    ...(orden !== undefined ? { orden } : {}),
   };
 }
 
-/** Convierte un deudor con saldo al formato de la respuesta: el saldo como texto con 2 decimales. */
+/**
+ * Convierte un deudor con saldo al formato de la respuesta: el saldo como texto con 2 decimales,
+ * `fiadoDesde` en ISO 8601 y la próxima fecha estimada tal como la entrega el repository (`AAAA-MM-DD`).
+ */
 function convertirFilaCuentaCorriente(fila: FilaCuentaCorriente): CuentaCorrienteListada {
   return {
     idDeudor: fila.idDeudor,
@@ -69,6 +88,8 @@ function convertirFilaCuentaCorriente(fila: FilaCuentaCorriente): CuentaCorrient
     dni: fila.dni,
     saldo: formatearImporte(fila.saldo),
     cantidadFiadosPendientes: fila.cantidadFiadosPendientes,
+    fiadoDesde: fila.fiadoDesde === null ? null : fila.fiadoDesde.toISOString(),
+    proximaFechaEstimadaPago: fila.proximaFechaEstimadaPago,
   };
 }
 

@@ -19,12 +19,29 @@ export type ConsultarEstadoCuentaInput = z.infer<typeof consultarEstadoCuentaSch
 
 // --- DATOS DE LA BASE ---
 
+/** Columna por la que se ordena el listado: uno de los valores de `ordenarPor`. */
+export type CampoOrdenCuentasCorrientes = NonNullable<ConsultarCuentasCorrientesInput["ordenarPor"]>;
+
+/** Sentido del orden: ascendente o descendente. */
+export type SentidoOrdenCuentasCorrientes = NonNullable<ConsultarCuentasCorrientesInput["sentido"]>;
+
+/** Orden pedido por el cliente, ya con el sentido resuelto (el service aplica el predeterminado). */
+export type OrdenCuentasCorrientes = {
+  campo: CampoOrdenCuentasCorrientes;
+  sentido: SentidoOrdenCuentasCorrientes;
+};
+
 /** Filtro del listado ya traducido a lo que consulta el repository. */
 export type FiltroCuentasCorrientes = {
   /** Texto a buscar dentro del nombre o del DNI, sin distinguir mayúsculas. Nunca viene vacío; ausente = sin filtro de texto. */
   texto?: string;
   /** Con `false` solo se listan los deudores con saldo mayor a 0. */
   incluirSinDeuda: boolean;
+  /**
+   * Orden pedido. Ausente = el orden de siempre (saldo descendente, nombre y id ascendentes). No es un filtro, pero viaja junto
+   * a ellos porque el repository arma una sola consulta con el filtro y el orden.
+   */
+  orden?: OrdenCuentasCorrientes;
 };
 
 /** Un deudor con su saldo, tal como lo devuelve el repository (el saldo ya sumado en la base, con decimal exacto). */
@@ -35,6 +52,10 @@ export type FilaCuentaCorriente = {
   /** Suma de lo que falta pagar de sus fiados pendientes; 0 si no tiene ninguno. */
   saldo: Decimal;
   cantidadFiadosPendientes: number;
+  /** `fechaHora` del fiado `PENDIENTE_PAGO` más antiguo; `null` si no tiene fiados pendientes. */
+  fiadoDesde: Date | null;
+  /** Fecha estimada de pago (`AAAA-MM-DD`) más temprana entre sus fiados pendientes; `null` si ninguno tiene. */
+  proximaFechaEstimadaPago: string | null;
 };
 
 /** Página del listado tal como la devuelve el repository. */
@@ -74,6 +95,13 @@ export type CuentaCorrienteListada = {
   /** Lo que el deudor debe hoy: suma de lo que falta de sus fiados pendientes. */
   saldo: string;
   cantidadFiadosPendientes: number;
+  /** `fechaHora` (ISO 8601) del fiado pendiente más antiguo; `null` si el deudor no tiene fiados pendientes. */
+  fiadoDesde: string | null;
+  /**
+   * Fecha estimada de pago (`AAAA-MM-DD`, sin hora) más temprana entre sus fiados pendientes, incluidas las ya vencidas;
+   * `null` si ninguno tiene fecha. Es solo informativa.
+   */
+  proximaFechaEstimadaPago: string | null;
 };
 
 /** Metadatos de paginación de `GET /api/cuentas-corrientes` (la misma forma que el historial de ventas). */
@@ -89,7 +117,8 @@ export type PaginacionCuentasCorrientes = {
 
 /**
  * Respuesta exitosa de `GET /api/cuentas-corrientes`. Una página fuera de rango devuelve `cuentasCorrientes` vacío.
- * Orden: saldo descendente, desempate por nombre ascendente y luego por id ascendente.
+ * Orden: el pedido con `ordenarPor` y `sentido` (los nulos siempre al final) o, sin ellos, saldo descendente;
+ * en ambos casos el desempate es nombre ascendente y luego id ascendente.
  */
 export type ConsultarCuentasCorrientesResponse = {
   exito: true;
