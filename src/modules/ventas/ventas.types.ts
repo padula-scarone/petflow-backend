@@ -151,6 +151,8 @@ export type FiltroHistorialVentas = {
   estado?: EstadoVentaHistorial;
   /** Solo ventas con este origen. */
   origen?: OrigenVenta;
+  /** Solo ventas con esta modalidad de entrega (RETIRO o ENVIO). */
+  modalidadEntrega?: ModalidadEntrega;
   /**
    * Un id: ventas con exactamente un pago, y que sea de ese medio (las mixtas no entran).
    * `"MIXTO"`: ventas con más de un pago. Los dos filtros son disjuntos: ninguna venta sale en ambos.

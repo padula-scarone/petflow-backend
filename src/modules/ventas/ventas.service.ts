@@ -379,6 +379,7 @@ export function calcularFiltroHistorial(consulta: ConsultarHistorialInput): Filt
     ...(consulta.idProducto !== undefined ? { idProducto: consulta.idProducto } : {}),
     ...(consulta.estado !== undefined ? { estado: consulta.estado } : {}),
     ...(consulta.origen !== undefined ? { origen: consulta.origen } : {}),
+    ...(consulta.modalidadEntrega !== undefined ? { modalidadEntrega: consulta.modalidadEntrega } : {}),
     ...(consulta.medioPago !== undefined ? { medioPago: consulta.medioPago } : {}),
     // Un texto vacío tras el recorte equivale a no filtrar (el front lo manda así cuando el campo está limpio)
     ...(consulta.textoCliente !== undefined && consulta.textoCliente !== ""

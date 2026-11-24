@@ -349,6 +349,8 @@ export const consultarHistorialSchema = z
     idProducto: enteroDesdeTexto(1, ID_PRODUCTO_MAXIMO).optional(),
     estado: z.enum(ESTADOS_VENTA_HISTORIAL).optional(),
     origen: z.enum(ORIGENES_VENTA_HISTORIAL).optional(),
+    // Mismos valores que el alta (`MODALIDADES_ENTREGA`), así el filtro no puede divergir del campo que filtra
+    modalidadEntrega: z.enum(MODALIDADES_ENTREGA).optional(),
     medioPago: medioPagoHistorialSchema.optional(),
     textoCliente: z.string().trim().max(TEXTO_CLIENTE_LONGITUD_MAXIMA).optional(),
     numeroComprobante: z.string().trim().max(NUMERO_COMPROBANTE_LONGITUD_MAXIMA).optional(),

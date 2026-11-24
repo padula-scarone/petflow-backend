@@ -1261,6 +1261,7 @@ const descripcionesParametrosHistorial: Record<string, string> = {
   idProducto: `Entero positivo (máximo ${ID_PRODUCTO_MAXIMO}). Solo ventas que contienen este producto en sus detalles.`,
   estado: "Solo ventas en este estado. Sin este filtro se devuelven todas, incluidas las anuladas.",
   origen: "Solo ventas con este origen (MOSTRADOR o DIGITAL).",
+  modalidadEntrega: "Solo ventas con esta modalidad de entrega (RETIRO o ENVIO), en mayúsculas.",
   medioPago:
     `Id de un medio de pago (entero positivo, máximo ${ID_MEDIO_PAGO_MAXIMO}) o el literal \`${VALOR_MEDIO_PAGO_MIXTO}\` en mayúsculas. ` +
     "Con un id: solo las ventas con exactamente un pago, y que ese pago sea de ese medio. " +
@@ -2023,7 +2024,7 @@ export const openapiDocument = {
         summary: "Consultar el historial de ventas (paginado, con filtros)",
         description:
           "Alimenta la grilla del historial. Orden fijo: fecha descendente con desempate por id descendente. " +
-          "Los filtros son opcionales y se combinan con AND (fechas, producto, estado, origen, medio de pago, nombre del deudor y comprobante). " +
+          "Los filtros son opcionales y se combinan con AND (fechas, producto, estado, origen, modalidad de entrega, medio de pago, nombre del deudor y comprobante). " +
           "Una página fuera de rango devuelve 200 con lista vacía. " +
           "Cada venta trae `fechaHoraLimiteModificacion`, `cantidadCambiosActivos` y `deudor` (id y nombre; nulo si es de contado o anterior al vínculo con deudores), y la raíz `fechaHoraServidor`. " +
           "`clienteReferencia` es obsoleto y solo lectura: las ventas anteriores lo conservan. " +
@@ -2036,7 +2037,7 @@ export const openapiDocument = {
           },
           "400": {
             description:
-              "Parámetros de consulta inválidos (formato, rango, fecha inexistente, rango de fechas invertido, `origen` fuera de MOSTRADOR/DIGITAL, " +
+              "Parámetros de consulta inválidos (formato, rango, fecha inexistente, rango de fechas invertido, `origen` fuera de MOSTRADOR/DIGITAL, `modalidadEntrega` fuera de RETIRO/ENVIO, " +
               "`medioPago` que no es un id positivo ni `MIXTO` en mayúsculas, o `textoCliente` (nombre del deudor) / `numeroComprobante` más largos que su máximo)",
             content: { "application/json": { schema: errorValidacionConsulta } },
           },

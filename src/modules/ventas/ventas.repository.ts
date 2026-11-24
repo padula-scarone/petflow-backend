@@ -595,6 +595,8 @@ function construirCondicionHistorial(filtro: FiltroHistorialVentas, idsVentasMix
     // "some" evita duplicar la venta cuando el producto aparece en más de un detalle
     ...(filtro.idProducto !== undefined ? { detalles: { some: { idProducto: filtro.idProducto } } } : {}),
     ...(filtro.origen !== undefined ? { origen: filtro.origen } : {}),
+    // Es una columna propia de la venta (no una relación): filtro de igualdad, como `origen`
+    ...(filtro.modalidadEntrega !== undefined ? { modalidadEntrega: filtro.modalidadEntrega } : {}),
     // Medio puntual: exactamente un pago y de ese medio. Se logra con "some" del medio y excluyendo las ventas mixtas
     // (más de un pago), así una venta que usó ese medio junto con otro sale solo con "MIXTO" y nunca en los dos filtros.
     // "MIXTO": las ventas con más de un pago, por sus ids. Ambos usan la misma lista de ids mixtos, de modo que sus
