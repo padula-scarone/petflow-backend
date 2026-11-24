@@ -199,6 +199,9 @@ model Venta {
   // Direccion a la que se envia el pedido. Obligatoria (a nivel de aplicacion) solo con modalidadEntrega ENVIO; nula en RETIRO
   // y en las ventas anteriores. Es un dato personal: no va al historial, ni a mensajes de error, ni a logs (RNF-VENTAS-03)
   direccionEnvio    String?          @map("direccion_envio") @db.VarChar(200)
+  // Nombre de quien recibe el pedido. Opcional con ENVIO y nulo en RETIRO y en las ventas anteriores. Dato personal: mismo
+  // trato que la direccion (no va al historial, ni a mensajes de error, ni a logs)
+  destinatarioEnvio String?          @map("destinatario_envio") @db.VarChar(100)
   // Obsoleto: texto libre de las ventas anteriores al vinculo con deudores. Ya no se escribe; se conserva solo para leerlo
   clienteReferencia String?          @map("cliente_referencia") @db.VarChar(100)
   // Deudor del fiado. Nulo en las ventas de contado y en las anteriores al vinculo (obligatorio solo en el alta de un fiado, lo valida el esquema)
