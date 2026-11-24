@@ -203,6 +203,20 @@ const fechaEstimadaPago = {
     "Nula en contado y en fiados sin fecha",
 };
 
+/**
+ * Dirección de envío de una venta en las respuestas del alta y del detalle. NO se devuelve en el historial (dato personal).
+ * Es el mismo texto en las dos respuestas; cada una ajusta el final de la descripción.
+ */
+const direccionEnvio = {
+  type: "string",
+  nullable: true,
+  maxLength: 200,
+  example: "Av. Siempre Viva 742, Piso 3 B",
+  description:
+    "Dirección a la que se envía el pedido. Con `modalidadEntrega` ENVIO siempre tiene valor; nula con RETIRO y en las ventas anteriores a que se registrara. " +
+    "Dato personal: no se devuelve en el historial ni se repite en mensajes de error",
+};
+
 /** Respuesta exitosa de `POST /api/ventas` (ver `RegistrarVentaResponse`). */
 const ventaRegistrada = {
   type: "object",
@@ -256,9 +270,23 @@ const ventaRegistrada = {
           ...fechaEstimadaPago,
           description: `${fechaEstimadaPago.description}. Es la fecha que quedó guardada (releída de la base)`,
         },
+        direccionEnvio: {
+          ...direccionEnvio,
+          description: `${direccionEnvio.description}. Es el texto que quedó guardado, ya recortado (releído de la base)`,
+        },
       },
       // numeroComprobante nunca es nulo: se emite siempre, incluso en un fiado
-      required: ["idVenta", "numeroComprobante", "montoTotal", "estado", "fechaHora", "pagos", "deudor", "fechaEstimadaPago"],
+      required: [
+        "idVenta",
+        "numeroComprobante",
+        "montoTotal",
+        "estado",
+        "fechaHora",
+        "pagos",
+        "deudor",
+        "fechaEstimadaPago",
+        "direccionEnvio",
+      ],
     },
   },
 };
@@ -440,6 +468,7 @@ const ventaConsultada = {
         },
         origen: { type: "string", enum: ["MOSTRADOR", "DIGITAL"] },
         modalidadEntrega: { type: "string", enum: ["RETIRO", "ENVIO"] },
+        direccionEnvio,
         clienteReferencia: {
           type: "string",
           nullable: true,
@@ -561,6 +590,7 @@ const ventaConsultada = {
         "fechaHoraLimiteModificacion",
         "origen",
         "modalidadEntrega",
+        "direccionEnvio",
         "clienteReferencia",
         "deudor",
         "fechaEstimadaPago",
@@ -1852,6 +1882,13 @@ const cuerpoAltaVenta = {
         "Solo en un fiado (`pagos` vacío): en contado con fecha no nula es 400. No puede ser anterior a hoy en hora de Argentina (hoy sí vale): 400. " +
         "Se guarda tal cual, sin hora. Es solo informativa",
     },
+    // Zod ya aporta `type`, `minLength` y `maxLength`: solo se suma la regla cruzada con la modalidad, que Zod no expresa en el campo
+    direccionEnvio: {
+      ...((esquemaAltaVenta.properties ?? {}).direccionEnvio as object),
+      description:
+        "Dirección de envío (se recorta; de 1 a 200 caracteres). Obligatoria si `modalidadEntrega` es ENVIO (400 si falta) " +
+        "y no se admite con RETIRO (400 si viene). Los mensajes de error nunca repiten su valor",
+    },
   },
 };
 
@@ -2018,6 +2055,8 @@ export const openapiDocument = {
           "en contado con fecha no nula es 400, una fecha anterior a hoy en hora de Argentina es 400 (hoy sí vale) y con formato inválido o inexistente (`2026-13-45`) es 400; " +
           "se guarda sin hora y la respuesta la devuelve tal como quedó guardada (`null` si no hay). " +
           "`clienteReferencia` ya no forma parte del contrato: si llega se descarta sin error y no se guarda. " +
+          "`direccionEnvio` (1 a 200 caracteres) es obligatoria con `modalidadEntrega` ENVIO y no se admite con RETIRO; la respuesta la devuelve tal como quedó guardada (`null` con retiro) " +
+          "y `GET /api/ventas/{idVenta}` también. No va en el historial y no se repite en los mensajes de error (dato personal). " +
           "Descuenta stock y congela precio y costo de cada ítem. Los cobros se asocian a la última caja abierta. " +
           "Toda venta, cobrada o fiado, devuelve su `numeroComprobante` (ticket de pago o ticket de deuda). " +
           "El vendedor es el usuario del token: un `idUsuario` en el body se ignora sin error. " +
@@ -2043,6 +2082,7 @@ export const openapiDocument = {
             description:
               "Body inválido o regla de negocio incumplida (stock, montos, producto inactivo, descuento sin motivo o motivo sin descuento, " +
               "fiado sin `idDeudor`, venta de contado con `idDeudor` o con `fechaEstimadaPago` no nula, `fechaEstimadaPago` con formato inválido o anterior a hoy, " +
+              "envío sin `direccionEnvio`, retiro con `direccionEnvio` o dirección vacía o de más de 200 caracteres, " +
               "`montoRecibido` menor al monto final o en un medio que no es efectivo)",
             content: {
               "application/json": { schema: { oneOf: [errorValidacion, errorNegocio] } },
@@ -2074,6 +2114,7 @@ export const openapiDocument = {
           "Devuelve `motivoDescuento` (nivel venta) y, en cada pago, `montoRecibido` y `vuelto`; son nulos en ventas anteriores o cuando no aplican. " +
           "Devuelve `deudor` con sus cuatro datos, nulo en una venta de contado y en las anteriores al vínculo con deudores " +
           "(que conservan `clienteReferencia`, obsoleto y solo lectura). " +
+          "Devuelve `direccionEnvio`, nula con retiro y en las ventas anteriores a que se registrara (el historial no la trae). " +
           "Devuelve `anulacion` (fecha, motivo y usuario que anuló), nula si la venta no está ANULADA o se anuló antes de que se registrara la auditoría. " +
           "Devuelve `fechaHoraServidor` en la raíz, `venta.fechaHoraLimiteModificacion` (nula si está ANULADA) y, por ítem, `cantidadYaDevuelta`. " +
           "Solo lectura: no modifica stock, caja ni estado. Cualquier rol autorizado ve cualquier venta " +
