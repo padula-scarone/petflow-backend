@@ -3,6 +3,7 @@ import type { Decimal } from "../../shared/decimal.js";
 import type { Deudor } from "../deudores/deudores.types.js";
 import type { MedioPagoVigente, PagoCobroCalculado } from "../ventas/ventas.types.js";
 import type {
+  consultarCobroSchema,
   consultarCuentasCorrientesSchema,
   consultarEstadoCuentaSchema,
   registrarCobroCuerpoSchema,
@@ -19,12 +20,29 @@ export type ConsultarEstadoCuentaInput = z.infer<typeof consultarEstadoCuentaSch
 
 // --- DATOS DE LA BASE ---
 
+/** Columna por la que se ordena el listado: uno de los valores de `ordenarPor`. */
+export type CampoOrdenCuentasCorrientes = NonNullable<ConsultarCuentasCorrientesInput["ordenarPor"]>;
+
+/** Sentido del orden: ascendente o descendente. */
+export type SentidoOrdenCuentasCorrientes = NonNullable<ConsultarCuentasCorrientesInput["sentido"]>;
+
+/** Orden pedido por el cliente, ya con el sentido resuelto (el service aplica el predeterminado). */
+export type OrdenCuentasCorrientes = {
+  campo: CampoOrdenCuentasCorrientes;
+  sentido: SentidoOrdenCuentasCorrientes;
+};
+
 /** Filtro del listado ya traducido a lo que consulta el repository. */
 export type FiltroCuentasCorrientes = {
   /** Texto a buscar dentro del nombre o del DNI, sin distinguir mayúsculas. Nunca viene vacío; ausente = sin filtro de texto. */
   texto?: string;
   /** Con `false` solo se listan los deudores con saldo mayor a 0. */
   incluirSinDeuda: boolean;
+  /**
+   * Orden pedido. Ausente = el orden de siempre (saldo descendente, nombre y id ascendentes). No es un filtro, pero viaja junto
+   * a ellos porque el repository arma una sola consulta con el filtro y el orden.
+   */
+  orden?: OrdenCuentasCorrientes;
 };
 
 /** Un deudor con su saldo, tal como lo devuelve el repository (el saldo ya sumado en la base, con decimal exacto). */
@@ -35,6 +53,10 @@ export type FilaCuentaCorriente = {
   /** Suma de lo que falta pagar de sus fiados pendientes; 0 si no tiene ninguno. */
   saldo: Decimal;
   cantidadFiadosPendientes: number;
+  /** `fechaHora` del fiado `PENDIENTE_PAGO` más antiguo; `null` si no tiene fiados pendientes. */
+  fiadoDesde: Date | null;
+  /** Fecha estimada de pago (`AAAA-MM-DD`) más temprana entre sus fiados pendientes; `null` si ninguno tiene. */
+  proximaFechaEstimadaPago: string | null;
 };
 
 /** Página del listado tal como la devuelve el repository. */
@@ -58,10 +80,25 @@ export type FiadoLeido = {
   montosCobrados: Decimal[];
 };
 
+/** Un cobro aplicado a un fiado, tal como lo lee el estado de cuenta: cuándo, con qué recibo y cuánto se aplicó a ESE fiado. */
+export type PagoDeFiadoLeido = {
+  idCobroDeudor: number;
+  /** Se asigna en la misma transacción que crea el cobro, pero la columna es nullable: se informa tal cual está guardada. */
+  numeroRecibo: string | null;
+  fechaHora: Date;
+  /** Lo aplicado a este fiado (`detalles_cobro_deudor.monto`), no el total del cobro, que puede cubrir varios fiados. */
+  monto: Decimal;
+};
+
+/** Un fiado pendiente con el detalle de sus cobros, para el estado de cuenta. Los cobros ya vienen ordenados por fecha ascendente. */
+export type FiadoConPagosLeido = FiadoLeido & {
+  pagos: PagoDeFiadoLeido[];
+};
+
 /** Lo que lee el repository para el estado de cuenta: el deudor (o `null` si no existe) y sus fiados pendientes ya ordenados. */
 export type EstadoCuentaLeido = {
   deudor: Deudor | null;
-  fiados: FiadoLeido[];
+  fiados: FiadoConPagosLeido[];
 };
 
 // --- RESPUESTA HTTP ---
@@ -74,6 +111,13 @@ export type CuentaCorrienteListada = {
   /** Lo que el deudor debe hoy: suma de lo que falta de sus fiados pendientes. */
   saldo: string;
   cantidadFiadosPendientes: number;
+  /** `fechaHora` (ISO 8601) del fiado pendiente más antiguo; `null` si el deudor no tiene fiados pendientes. */
+  fiadoDesde: string | null;
+  /**
+   * Fecha estimada de pago (`AAAA-MM-DD`, sin hora) más temprana entre sus fiados pendientes, incluidas las ya vencidas;
+   * `null` si ninguno tiene fecha. Es solo informativa.
+   */
+  proximaFechaEstimadaPago: string | null;
 };
 
 /** Metadatos de paginación de `GET /api/cuentas-corrientes` (la misma forma que el historial de ventas). */
@@ -89,12 +133,24 @@ export type PaginacionCuentasCorrientes = {
 
 /**
  * Respuesta exitosa de `GET /api/cuentas-corrientes`. Una página fuera de rango devuelve `cuentasCorrientes` vacío.
- * Orden: saldo descendente, desempate por nombre ascendente y luego por id ascendente.
+ * Orden: el pedido con `ordenarPor` y `sentido` (los nulos siempre al final) o, sin ellos, saldo descendente;
+ * en ambos casos el desempate es nombre ascendente y luego id ascendente.
  */
 export type ConsultarCuentasCorrientesResponse = {
   exito: true;
   cuentasCorrientes: CuentaCorrienteListada[];
   paginacion: PaginacionCuentasCorrientes;
+};
+
+/** Un cobro aplicado a un fiado, en el estado de cuenta. El `monto` va como texto con 2 decimales. */
+export type PagoDeFiado = {
+  idCobroDeudor: number;
+  /** Número del recibo del cobro (`REC-` y 8 dígitos). */
+  numeroRecibo: string | null;
+  /** Instante del cobro, en ISO 8601. */
+  fechaHora: string;
+  /** Lo aplicado a ESTE fiado (no el total del cobro, que puede cubrir varios fiados). */
+  monto: string;
 };
 
 /** Un fiado pendiente en el estado de cuenta. Los importes van como texto con 2 decimales. */
@@ -116,6 +172,11 @@ export type FiadoDeEstadoCuenta = {
   yaPagado: string;
   /** `importeAdeudado - yaPagado`. */
   falta: string;
+  /**
+   * Cobros aplicados a este fiado, del más viejo al más nuevo (`fechaHora` ascendente, desempate por `idCobroDeudor`).
+   * La suma de sus `monto` es `yaPagado`. Vacío si todavía no se cobró nada.
+   */
+  pagos: PagoDeFiado[];
 };
 
 /**
@@ -259,4 +320,83 @@ export type RegistrarCobroResponse = {
 export type CobroRegistrado = {
   calculo: CobroCalculado;
   persistido: CobroPersistido;
+};
+
+// ===== RECIBO DE UN COBRO: ENTRADA Y DATOS DE LA BASE =====
+
+/** Parametro de ruta validado de `GET /api/cuentas-corrientes/cobros/:idCobroDeudor`. */
+export type ConsultarCobroInput = z.infer<typeof consultarCobroSchema>;
+
+/** Un fiado cubierto por un cobro, tal como lo lee el recibo: cuanto de ese cobro se aplico a el. */
+export type FiadoCobroLeido = {
+  idVenta: number;
+  numeroComprobante: string | null;
+  /** Lo aplicado a este fiado (`detalles_cobro_deudor.monto`). */
+  monto: Decimal;
+};
+
+/** Un pago de un cobro, tal como se guardo (recargo o descuento congelado). Todo con Decimal exacto. */
+export type PagoCobroLeido = {
+  idMedioPago: number;
+  /** Nombre vigente del medio de pago al consultar. */
+  nombreMedioPago: string;
+  montoBase: Decimal;
+  /** Recargo (positivo) o descuento (negativo) que se aplico en ese cobro. */
+  porcentajeAplicado: Decimal;
+  montoFinal: Decimal;
+  /** Nulo si el medio no es efectivo o no se informo el monto recibido. */
+  montoRecibido: Decimal | null;
+  /** Nulo siempre que `montoRecibido` sea nulo. */
+  vuelto: Decimal | null;
+};
+
+/** Cobro completo con su deudor, usuario, fiados y pagos, tal como lo entrega el repository. Sin DNI ni telefono del deudor. */
+export type CobroLeido = {
+  idCobroDeudor: number;
+  /** Se asigna en la misma transaccion que crea el cobro, pero la columna es nullable: se informa tal cual esta guardada. */
+  numeroRecibo: string | null;
+  fechaHora: Date;
+  deudor: DeudorDeRecibo;
+  /** Quien registro el cobro (el usuario de la sesion de ese momento). */
+  usuario: UsuarioDeRecibo;
+  /** En el orden en que se guardaron (el mismo en que se pidieron). */
+  fiados: FiadoCobroLeido[];
+  /** En el orden en que se guardaron (el mismo en que se pidieron). */
+  pagos: PagoCobroLeido[];
+};
+
+// ===== RECIBO DE UN COBRO: RESPUESTA HTTP =====
+
+/** Deudor reducido a lo que muestra el recibo: sin DNI ni telefono (RNF-VENTAS-03). */
+export type DeudorDeRecibo = Pick<Deudor, "idDeudor" | "nombreCompleto">;
+
+/** Usuario que registro el cobro. */
+export type UsuarioDeRecibo = {
+  idUsuario: number;
+  nombre: string;
+};
+
+/** Un fiado cubierto por el cobro en el recibo. El importe va como texto con 2 decimales. */
+export type FiadoDeRecibo = {
+  idVenta: number;
+  numeroComprobante: string | null;
+  /** Lo aplicado a este fiado en este cobro. */
+  montoAbonado: string;
+};
+
+/** Respuesta exitosa (200) de `GET /api/cuentas-corrientes/cobros/:idCobroDeudor`. Los pagos tienen la misma forma que en el 201 del cobro. */
+export type ConsultarCobroResponse = {
+  exito: true;
+  cobro: {
+    idCobroDeudor: number;
+    numeroRecibo: string | null;
+    /** Instante del cobro en ISO 8601. */
+    fechaHora: string;
+  };
+  deudor: DeudorDeRecibo;
+  usuario: UsuarioDeRecibo;
+  fiados: FiadoDeRecibo[];
+  pagos: PagoDeCobro[];
+  /** Suma de los montos finales de los pagos: lo que pago el cliente, con los recargos o descuentos de los medios. */
+  totalCobrado: string;
 };

@@ -127,6 +127,8 @@ export type RegistrarVentaResponse = {
     deudor: Deudor | null;
     /** Fecha estimada de pago del fiado (`AAAA-MM-DD`, sin hora), tal como quedó guardada. Nula en contado y en fiados sin fecha. */
     fechaEstimadaPago: string | null;
+    /** Dirección de envío tal como quedó guardada (ya recortada). Nula con retiro. Dato personal: no se repite en errores ni en logs. */
+    direccionEnvio: string | null;
   };
 };
 
@@ -149,6 +151,8 @@ export type FiltroHistorialVentas = {
   estado?: EstadoVentaHistorial;
   /** Solo ventas con este origen. */
   origen?: OrigenVenta;
+  /** Solo ventas con esta modalidad de entrega (RETIRO o ENVIO). */
+  modalidadEntrega?: ModalidadEntrega;
   /**
    * Un id: ventas con exactamente un pago, y que sea de ese medio (las mixtas no entran).
    * `"MIXTO"`: ventas con más de un pago. Los dos filtros son disjuntos: ninguna venta sale en ambos.
@@ -304,6 +308,8 @@ export type VentaDetallada = {
   deudor: Deudor | null;
   /** Fecha estimada de pago (`AAAA-MM-DD`, sin hora) ya convertida a texto por el repositorio; nula si no tiene. */
   fechaEstimadaPago: string | null;
+  /** Dirección de envío; nula con retiro y en las ventas anteriores a que se registrara. */
+  direccionEnvio: string | null;
   vendedor: VendedorVenta;
   subtotalBrutoCentavos: number;
   descuentoManualCentavos: number;
@@ -373,6 +379,8 @@ export type VentaConsultada = {
    * Es solo informativa y se devuelve tal como se guardó, sea cual sea el estado actual de la venta.
    */
   fechaEstimadaPago: string | null;
+  /** Dirección de envío, o `null` con retiro y en las ventas anteriores. No viaja en el historial (dato personal). */
+  direccionEnvio: string | null;
   vendedor: VendedorVenta;
   /** Montos como texto con 2 decimales. */
   subtotalBruto: string;

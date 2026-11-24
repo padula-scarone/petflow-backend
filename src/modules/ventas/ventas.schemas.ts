@@ -94,12 +94,23 @@ export const fechaCalendarioSchema = z
   .regex(/^\d{4}-\d{2}-\d{2}$/, "Debe tener formato AAAA-MM-DD")
   .refine((fecha) => descomponerFechaCalendario(fecha) !== null, "La fecha no existe en el calendario");
 
+// --- MODALIDAD DE ENTREGA Y DIRECCION DE ENVIO ---
+// Van antes de `registrarVentaSchema` porque se evalúan al cargar el módulo: usarlas más arriba que su declaración fallaría.
+
+/** Modalidades de entrega: los mismos valores del enum `ModalidadEntrega`. Las comparten el alta y el filtro del historial. */
+export const MODALIDADES_ENTREGA = ["RETIRO", "ENVIO"] as const;
+
+/** Largo máximo de `direccionEnvio`: coincide con la columna `ventas.direccion_envio` (VARCHAR(200)). */
+export const DIRECCION_ENVIO_LONGITUD_MAXIMA = 200;
+
 // --- ESQUEMA PRINCIPAL ---
 
 /**
  * Contrato de entrada de `POST /api/ventas`.
  * Si `pagos` viene vacío la venta es un fiado y `idDeudor` pasa a ser obligatorio; en una venta de contado `idDeudor` no se admite.
  * Que el deudor exista lo verifica el service (el esquema no conoce la base).
+ * `direccionEnvio` es obligatoria con `modalidadEntrega` ENVIO y no se admite con RETIRO (400 en ambos casos). Es un dato
+ * personal: ningún mensaje de validación repite el valor recibido (RNF-VENTAS-03).
  * `fechaEstimadaPago` (`AAAA-MM-DD`) es opcional y nula equivale a omitida ("sin fecha"); solo se admite en un fiado:
  * una venta de contado con fecha no nula es 400. Que no sea anterior a hoy lo verifica el service (depende del reloj).
  * El vendedor no viaja en el body: sale del token. Si llega `idUsuario`, Zod lo descarta sin error (el objeto no es estricto).
@@ -108,7 +119,14 @@ export const fechaCalendarioSchema = z
 export const registrarVentaSchema = z
   .object({
     origen: z.enum(["MOSTRADOR", "DIGITAL"]),
-    modalidadEntrega: z.enum(["RETIRO", "ENVIO"]),
+    modalidadEntrega: z.enum(MODALIDADES_ENTREGA),
+    // Se recorta antes de medirla: un texto de solo espacios queda vacío y se rechaza. Los mensajes son fijos (no repiten el valor)
+    direccionEnvio: z
+      .string({ error: "La dirección de envío debe ser texto" })
+      .trim()
+      .min(1, "La dirección de envío no puede estar vacía")
+      .max(DIRECCION_ENVIO_LONGITUD_MAXIMA, `La dirección de envío admite hasta ${DIRECCION_ENVIO_LONGITUD_MAXIMA} caracteres`)
+      .optional(),
     idDeudor: z.number().int().positive().max(ID_ENTERO_MAXIMO).optional(),
     fechaEstimadaPago: fechaCalendarioSchema.nullish(),
     items: z.array(itemVentaSchema).min(1),
@@ -128,6 +146,23 @@ export const registrarVentaSchema = z
   })
   // Reglas que cruzan varios campos y no se pueden expresar en cada campo por separado
   .superRefine((data, ctx) => {
+    // La dirección va de la mano de la modalidad: el envío la necesita y el retiro no tiene a dónde enviar.
+    // Si el campo vino vacío o demasiado largo ya lo rechazó su propio campo; acá solo se cubre ausencia o contradicción
+    if (data.modalidadEntrega === "ENVIO" && data.direccionEnvio === undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["direccionEnvio"],
+        message: "Una venta con envío requiere la dirección de envío",
+      });
+    }
+    if (data.modalidadEntrega === "RETIRO" && data.direccionEnvio !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["direccionEnvio"],
+        message: "Una venta con retiro no admite dirección de envío",
+      });
+    }
+
     // Fiado = sin pagos. Un fiado necesita deudor; una venta de contado con deudor se rechaza porque una venta
     // COMPLETADA con deudor solo podría ser un fiado ya cobrado y quedaría indistinguible de uno.
     // Los mensajes son fijos: nunca incluyen datos del deudor (RNF-VENTAS-03)
@@ -314,6 +349,8 @@ export const consultarHistorialSchema = z
     idProducto: enteroDesdeTexto(1, ID_PRODUCTO_MAXIMO).optional(),
     estado: z.enum(ESTADOS_VENTA_HISTORIAL).optional(),
     origen: z.enum(ORIGENES_VENTA_HISTORIAL).optional(),
+    // Mismos valores que el alta (`MODALIDADES_ENTREGA`), así el filtro no puede divergir del campo que filtra
+    modalidadEntrega: z.enum(MODALIDADES_ENTREGA).optional(),
     medioPago: medioPagoHistorialSchema.optional(),
     textoCliente: z.string().trim().max(TEXTO_CLIENTE_LONGITUD_MAXIMA).optional(),
     numeroComprobante: z.string().trim().max(NUMERO_COMPROBANTE_LONGITUD_MAXIMA).optional(),

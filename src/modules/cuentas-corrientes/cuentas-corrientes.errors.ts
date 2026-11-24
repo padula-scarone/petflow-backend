@@ -17,6 +17,8 @@ export const CODIGOS_ERROR_COBRO = [
   "MONTO_EXCEDE_FALTA",
   "SIN_CAJA_ABIERTA",
   "COBRO_SIMULTANEO",
+  // Va al final a proposito: `openapi.ts` desestructura este arreglo por posicion, y asi los cinco anteriores no se mueven
+  "COBRO_NO_ENCONTRADO",
 ] as const;
 
 /** Codigo con el que el front distingue el motivo de un rechazo del cobro sin leer el texto del mensaje. */
@@ -79,6 +81,18 @@ export function crearErrorSinCajaParaCobrar(): ErrorNegocioCobro {
   return {
     ...crearErrorNegocio("No hay una caja abierta para registrar el cobro", 409),
     codigo: "SIN_CAJA_ABIERTA",
+  };
+}
+
+/**
+ * Crea el error de consultar el recibo de un cobro que no existe.
+ * El mensaje lleva solo el id: nunca datos del deudor (RNF-VENTAS-03).
+ * @param idCobroDeudor Id del cobro pedido.
+ */
+export function crearErrorCobroNoEncontrado(idCobroDeudor: number): ErrorNegocioCobro {
+  return {
+    ...crearErrorNegocio(`El cobro ${idCobroDeudor} no existe`, 404),
+    codigo: "COBRO_NO_ENCONTRADO",
   };
 }
 

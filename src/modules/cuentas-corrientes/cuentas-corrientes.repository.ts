@@ -9,15 +9,20 @@ import {
   crearErrorSinCajaParaCobrar,
 } from "./cuentas-corrientes.errors.js";
 import type {
+  CampoOrdenCuentasCorrientes,
   CobroCalculado,
+  CobroLeido,
   CobroRegistrado,
   EstadoCuentaLeido,
   FilaCuentaCorriente,
+  FiadoConPagosLeido,
   FiadoLeido,
   FiltroCuentasCorrientes,
   LecturaCobro,
+  OrdenCuentasCorrientes,
   PaginaCuentasCorrientes,
   RegistrarCobroInput,
+  SentidoOrdenCuentasCorrientes,
 } from "./cuentas-corrientes.types.js";
 
 // --- CONSTANTES ---
@@ -38,6 +43,27 @@ const SELECCION_FIADO = {
 
 /** Fila de venta leida con `SELECCION_FIADO`. */
 type FiadoLeidoDePrisma = Prisma.VentaGetPayload<{ select: typeof SELECCION_FIADO }>;
+
+/**
+ * Lo mismo que `SELECCION_FIADO`, pero cada cobro trae ademas su id, su recibo y su fecha: solo lo usa el estado de cuenta, que
+ * los muestra. Es una seleccion aparte (y no se amplia la compartida) para que el cobro, que lee los fiados bloqueados, no
+ * cargue joins que no necesita. Los cobros van ordenados por fecha ascendente con desempate por id: `monto` sigue siendo lo
+ * aplicado a ESTE fiado (`detalles_cobro_deudor`), y la suma de los `monto` es el mismo `yaPagado` de siempre.
+ */
+const SELECCION_FIADO_CON_PAGOS = {
+  ...SELECCION_FIADO,
+  detallesCobroDeudor: {
+    orderBy: [{ cobro: { fechaHora: "asc" } }, { idCobroDeudor: "asc" }],
+    select: {
+      idCobroDeudor: true,
+      monto: true,
+      cobro: { select: { numeroRecibo: true, fechaHora: true } },
+    },
+  },
+} satisfies Prisma.VentaSelect;
+
+/** Fila de venta leida con `SELECCION_FIADO_CON_PAGOS`. */
+type FiadoConPagosDePrisma = Prisma.VentaGetPayload<{ select: typeof SELECCION_FIADO_CON_PAGOS }>;
 
 /**
  * Tiempo maximo de la transaccion del cobro, en milisegundos (el predeterminado de Prisma, escrito a proposito).
@@ -65,13 +91,20 @@ const CARACTER_ESCAPE_LIKE = "!";
 
 // --- TIPOS DEL REPOSITORIO ---
 
-/** Fila cruda del listado, con los nombres físicos de las columnas. Los `numeric` salen como texto y los conteos como entero. */
+/**
+ * Fila cruda del listado, con los nombres físicos de las columnas. Los `numeric` salen como texto, los conteos como entero
+ * y las fechas como texto (ver `SQL_SALDOS_POR_DEUDOR` y `buscarPaginaCuentasCorrientes`).
+ */
 type FilaSqlCuentaCorriente = {
   id_deudor: number;
   nombre_completo: string;
   dni: string;
   saldo_texto: string;
   cantidad_fiados_pendientes: number;
+  /** Instante UTC en ISO 8601 (`AAAA-MM-DDTHH:MI:SS.mmmZ`); nulo si no hay fiados pendientes. */
+  fiado_desde_texto: string | null;
+  /** `AAAA-MM-DD`; nulo si ningún fiado pendiente tiene fecha estimada. */
+  proxima_fecha_estimada_pago_texto: string | null;
 };
 
 /** Fila cruda del conteo del listado. */
@@ -104,19 +137,28 @@ function escaparComodinesLike(texto: string): string {
  * La resta se hace por fiado (y no sobre sumas) para que un fiado con varios cobros no cuente dos veces su importe.
  *
  * Solo cuentan los fiados: ventas `PENDIENTE_PAGO` con deudor. `yaPagado` es la suma de `detalles_cobro_deudor.monto`.
+ * Las dos fechas del listado salen de los mismos fiados pendientes: `fiado_desde` es la `fecha_hora` más antigua y
+ * `proxima_fecha_estimada_pago` la `fecha_estimada_pago` más temprana (incluye las ya vencidas). `MIN` ignora los nulos,
+ * así que valen `NULL` si el deudor no tiene fiados pendientes o si ninguno tiene fecha estimada.
  * Deja definida la tabla `cuentas` (un deudor por fila, con saldo 0 si no tiene fiados pendientes).
  */
 const SQL_SALDOS_POR_DEUDOR = Prisma.sql`
   WITH faltas AS (
     SELECT v.id_deudor,
+           v.fecha_hora,
+           v.fecha_estimada_pago,
            (v.subtotal_bruto - v.descuento_manual) - COALESCE(SUM(d.monto), 0) AS falta
     FROM ventas v
     LEFT JOIN detalles_cobro_deudor d ON d.id_venta = v.id_venta
     WHERE v.estado = 'PENDIENTE_PAGO' AND v.id_deudor IS NOT NULL
-    GROUP BY v.id_venta, v.id_deudor, v.subtotal_bruto, v.descuento_manual
+    GROUP BY v.id_venta, v.id_deudor, v.fecha_hora, v.fecha_estimada_pago, v.subtotal_bruto, v.descuento_manual
   ),
   saldos AS (
-    SELECT id_deudor, SUM(falta) AS saldo, COUNT(*) AS cantidad_fiados_pendientes
+    SELECT id_deudor,
+           SUM(falta) AS saldo,
+           COUNT(*) AS cantidad_fiados_pendientes,
+           MIN(fecha_hora) AS fiado_desde,
+           MIN(fecha_estimada_pago) AS proxima_fecha_estimada_pago
     FROM faltas
     GROUP BY id_deudor
   ),
@@ -125,11 +167,63 @@ const SQL_SALDOS_POR_DEUDOR = Prisma.sql`
            de.nombre_completo,
            de.dni,
            COALESCE(s.saldo, 0) AS saldo,
-           COALESCE(s.cantidad_fiados_pendientes, 0) AS cantidad_fiados_pendientes
+           COALESCE(s.cantidad_fiados_pendientes, 0) AS cantidad_fiados_pendientes,
+           s.fiado_desde,
+           s.proxima_fecha_estimada_pago
     FROM deudores de
     LEFT JOIN saldos s ON s.id_deudor = de.id_deudor
   )
 `;
+
+// --- SQL CRUDO: ORDEN DEL LISTADO ---
+
+/**
+ * Orden de siempre del listado: saldo descendente, desempate por nombre y luego por id ascendentes.
+ * Se usa cuando el cliente no pide `ordenarPor`.
+ */
+const SQL_ORDEN_PREDETERMINADO = Prisma.sql`ORDER BY saldo DESC, nombre_completo ASC, id_deudor ASC`;
+
+/**
+ * Columna de la tabla `cuentas` por la que ordena cada valor de `ordenarPor`. Mapa cerrado y tipado (`Record` exige una entrada
+ * por cada valor del enumerado): el SQL sale de estas constantes y NUNCA del texto recibido, así no hay inyección posible.
+ * Cada nombre es una columna de `cuentas`, no un alias de salida: con `saldo` se ordena el `numeric` (no el texto `saldo_texto`)
+ * y las fechas se ordenan como fecha (no como el texto `*_texto`). `nombre_completo` y `cantidad_fiados_pendientes` coinciden
+ * con su alias de salida, pero ese alias tiene el mismo valor y tipo comparable, así que el orden es el mismo.
+ */
+const SQL_COLUMNA_ORDEN: Record<CampoOrdenCuentasCorrientes, Prisma.Sql> = {
+  nombre: Prisma.sql`nombre_completo`,
+  fiadosPendientes: Prisma.sql`cantidad_fiados_pendientes`,
+  saldo: Prisma.sql`saldo`,
+  fechaFiado: Prisma.sql`fiado_desde`,
+  proximoPago: Prisma.sql`proxima_fecha_estimada_pago`,
+};
+
+/** Sentido del orden como fragmento fijo de SQL (mismo criterio que `SQL_COLUMNA_ORDEN`). */
+const SQL_SENTIDO_ORDEN: Record<SentidoOrdenCuentasCorrientes, Prisma.Sql> = {
+  asc: Prisma.sql`ASC`,
+  desc: Prisma.sql`DESC`,
+};
+
+/**
+ * Arma el `ORDER BY` del listado. Siempre termina en desempates fijos (nombre y luego id ascendentes): sin ellos la paginación
+ * podría repetir o saltarse filas que empatan en la columna elegida.
+ * `NULLS LAST` va explícito porque PostgreSQL pone los nulos PRIMERO en `DESC`: así los nulos (deudores sin fiados pendientes o
+ * sin fecha estimada) quedan siempre al final, sea cual sea el sentido. Para `nombre` no hace falta: `nombre_completo` nunca es nulo.
+ * @param orden Orden pedido, o `undefined` para el orden de siempre.
+ */
+function construirOrden(orden: OrdenCuentasCorrientes | undefined): Prisma.Sql {
+  if (orden === undefined) {
+    return SQL_ORDEN_PREDETERMINADO;
+  }
+  const columna = SQL_COLUMNA_ORDEN[orden.campo];
+  const sentido = SQL_SENTIDO_ORDEN[orden.sentido];
+
+  if (orden.campo === "nombre") {
+    // Dos deudores con el mismo nombre se desempatan por id, que es único
+    return Prisma.sql`ORDER BY ${columna} ${sentido}, id_deudor ASC`;
+  }
+  return Prisma.sql`ORDER BY ${columna} ${sentido} NULLS LAST, nombre_completo ASC, id_deudor ASC`;
+}
 
 /**
  * Arma el `WHERE` del listado sobre la tabla `cuentas` de `SQL_SALDOS_POR_DEUDOR`: el filtro de saldo y el de texto.
@@ -157,8 +251,11 @@ function construirCondicionCuentas(filtro: FiltroCuentasCorrientes): Prisma.Sql 
  * Busca una página de deudores con su saldo y el total que cumple el filtro.
  * El filtro de saldo, el orden y la paginación se resuelven en la base (SQL crudo): Prisma no puede filtrar ni ordenar
  * por un saldo calculado con una suma de otra tabla, y cargar todos los deudores en memoria no escala.
- * Orden fijo: saldo descendente (sobre el `numeric`, no sobre el texto), desempate por nombre ascendente y luego por id ascendente;
- * sin desempate la paginación podría repetir o saltarse filas. El orden alfabético depende de la intercalación de la base.
+ * Orden: el pedido en `filtro.orden` (ver `construirOrden`) o, sin él, saldo descendente (sobre el `numeric`, no sobre el texto),
+ * desempate por nombre ascendente y luego por id ascendente; sin desempate la paginación podría repetir o saltarse filas.
+ * El orden alfabético depende de la intercalación de la base.
+ * Las fechas (`fiado_desde` y `proxima_fecha_estimada_pago`) salen como texto armado por la base con `to_char`: así no dependen
+ * de cómo el adaptador devuelve `timestamptz` y `date` (la regla de siempre para los tipos que no son texto ni entero).
  * La página y el total salen de una transacción `RepeatableRead` (la misma foto de la base). El total es una consulta aparte
  * y no `COUNT(*) OVER()`: con una página fuera de rango no hay filas y el total saldría 0.
  * @param filtro Filtro ya traducido.
@@ -171,21 +268,26 @@ export async function buscarPaginaCuentasCorrientes(
   cantidadPorPagina: number,
 ): Promise<PaginaCuentasCorrientes> {
   const condicion = construirCondicionCuentas(filtro);
+  const orden = construirOrden(filtro.orden);
 
   const [filas, totales] = await prisma.$transaction(
     [
-      // `saldo_texto` (y no `saldo`) como alias: en un ORDER BY un nombre que coincide con una columna de salida se interpreta
-      // como esa columna; con `saldo` ordenaría el texto ("9.00" después de "10.00") en lugar del numérico
+      // Los alias de salida de las columnas `numeric` y de fecha (`saldo_texto`, `fiado_desde_texto` y
+      // `proxima_fecha_estimada_pago_texto`) son distintos del nombre de la columna por la que se ordena: en un ORDER BY un
+      // nombre que coincide con una columna de salida se interpreta como esa columna; con `saldo` ordenaría el texto
+      // ("9.00" después de "10.00") en lugar del numérico. El instante sale en UTC y con el formato de `Date.toISOString()`
       prisma.$queryRaw<FilaSqlCuentaCorriente[]>`
         ${SQL_SALDOS_POR_DEUDOR}
         SELECT id_deudor,
                nombre_completo,
                dni,
                saldo::text AS saldo_texto,
-               cantidad_fiados_pendientes::int AS cantidad_fiados_pendientes
+               cantidad_fiados_pendientes::int AS cantidad_fiados_pendientes,
+               to_char(fiado_desde AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS fiado_desde_texto,
+               to_char(proxima_fecha_estimada_pago, 'YYYY-MM-DD') AS proxima_fecha_estimada_pago_texto
         FROM cuentas
         ${condicion}
-        ORDER BY saldo DESC, nombre_completo ASC, id_deudor ASC
+        ${orden}
         LIMIT ${cantidadPorPagina} OFFSET ${desplazamiento}
       `,
       prisma.$queryRaw<FilaSqlTotal[]>`
@@ -205,6 +307,9 @@ export async function buscarPaginaCuentasCorrientes(
         dni: fila.dni,
         saldo: aDecimal(fila.saldo_texto),
         cantidadFiadosPendientes: fila.cantidad_fiados_pendientes,
+        // El texto ya es un instante ISO en UTC: `new Date` lo lee sin corrimiento
+        fiadoDesde: fila.fiado_desde_texto === null ? null : new Date(fila.fiado_desde_texto),
+        proximaFechaEstimadaPago: fila.proxima_fecha_estimada_pago_texto,
       }),
     ),
     totalRegistros: totales[0]?.total ?? 0,
@@ -216,7 +321,7 @@ export async function buscarPaginaCuentasCorrientes(
 /**
  * Lee un deudor y sus fiados pendientes con lo ya cobrado de cada uno, en una sola foto de la base (`RepeatableRead`).
  * Un fiado es una venta `PENDIENTE_PAGO` con ese deudor: las `COMPLETADA` y las `ANULADA` no cuentan.
- * Los cobros de cada fiado van en el mismo `select` de la venta (sin consulta por fila).
+ * Los cobros de cada fiado (con su recibo y fecha) van en el mismo `select` de la venta (sin consulta por fila).
  * Orden fijo: del más viejo al más nuevo (`fechaHora` ascendente, desempate por `idVenta` ascendente).
  * @param idDeudor Id del deudor, ya validado.
  * @returns El deudor (o `null` si no existe: el service decide el 404) y sus fiados pendientes.
@@ -228,13 +333,13 @@ export async function buscarEstadoCuentaDeudor(idDeudor: number): Promise<Estado
       prisma.venta.findMany({
         where: { idDeudor, estado: "PENDIENTE_PAGO" },
         orderBy: [{ fechaHora: "asc" }, { idVenta: "asc" }],
-        select: SELECCION_FIADO,
+        select: SELECCION_FIADO_CON_PAGOS,
       }),
     ],
     { isolationLevel: "RepeatableRead" },
   );
 
-  return { deudor, fiados: fiados.map(convertirFiadoLeido) };
+  return { deudor, fiados: fiados.map(convertirFiadoConPagosLeido) };
 }
 
 // --- CONVERSION DE UN FIADO LEIDO ---
@@ -249,6 +354,22 @@ function convertirFiadoLeido(fiado: FiadoLeidoDePrisma): FiadoLeido {
     subtotalBruto: aDecimal(fiado.subtotalBruto),
     descuentoManual: aDecimal(fiado.descuentoManual),
     montosCobrados: fiado.detallesCobroDeudor.map((detalle) => aDecimal(detalle.monto)),
+  };
+}
+
+/**
+ * Convierte un fiado leido con sus cobros detallados: lo mismo que `convertirFiadoLeido` mas `pagos`.
+ * `montosCobrados` sale de los mismos detalles que `pagos`, asi que `yaPagado` y la suma de los `monto` coinciden por construccion.
+ */
+function convertirFiadoConPagosLeido(fiado: FiadoConPagosDePrisma): FiadoConPagosLeido {
+  return {
+    ...convertirFiadoLeido(fiado),
+    pagos: fiado.detallesCobroDeudor.map((detalle) => ({
+      idCobroDeudor: detalle.idCobroDeudor,
+      numeroRecibo: detalle.cobro.numeroRecibo,
+      fechaHora: detalle.cobro.fechaHora,
+      monto: aDecimal(detalle.monto),
+    })),
   };
 }
 
@@ -463,4 +584,76 @@ export async function registrarCobroAtomico(input: RegistrarCobroInput, calcular
     }
     throw errorCapturado;
   }
+}
+
+// ===== RECIBO DE UN COBRO =====
+
+/**
+ * Busca un cobro de deudor por id con todo lo que muestra su recibo: el deudor (solo id y nombre), el usuario que cobro,
+ * los fiados cubiertos con lo aplicado a cada uno y los pagos con su medio. Es solo lectura.
+ * Una sola consulta con `select` anidado (sin consulta por fila) y SIN transaccion de solo lectura: un cobro es inmutable
+ * (no existe la anulacion de cobros y nadie modifica sus detalles ni sus pagos), asi que no hay una segunda escritura que pueda
+ * mostrar una foto mezclada. Si algun dia se pudiera anular o corregir un cobro, esta lectura debera pasar a `RepeatableRead`.
+ * El `select` pide solo lo que el contrato devuelve: nunca el DNI ni el telefono del deudor (RNF-VENTAS-03).
+ * Fiados y pagos van ordenados por su id: es el orden en que se guardaron, que es el orden en que se pidieron.
+ * @param idCobroDeudor Id del cobro, ya validado.
+ * @returns El cobro, o `null` si no existe (el service decide el 404).
+ */
+export async function buscarCobroPorId(idCobroDeudor: number): Promise<CobroLeido | null> {
+  const cobro = await prisma.cobroDeudor.findUnique({
+    where: { idCobroDeudor },
+    select: {
+      idCobroDeudor: true,
+      numeroRecibo: true,
+      fechaHora: true,
+      deudor: { select: { idDeudor: true, nombreCompleto: true } },
+      usuario: { select: { idUsuario: true, nombre: true } },
+      detalles: {
+        orderBy: { idDetalleCobroDeudor: "asc" },
+        select: {
+          monto: true,
+          venta: { select: { idVenta: true, numeroComprobante: true } },
+        },
+      },
+      pagos: {
+        orderBy: { idPagoCobroDeudor: "asc" },
+        select: {
+          montoBase: true,
+          porcentajeAplicado: true,
+          montoFinal: true,
+          montoRecibido: true,
+          vuelto: true,
+          medioPago: { select: { idMedioPago: true, nombre: true } },
+        },
+      },
+    },
+  });
+
+  if (cobro === null) {
+    return null;
+  }
+
+  // Lo leido (Decimal de Prisma) se pasa al Decimal aislado para que el service calcule con aritmetica exacta
+  return {
+    idCobroDeudor: cobro.idCobroDeudor,
+    numeroRecibo: cobro.numeroRecibo,
+    fechaHora: cobro.fechaHora,
+    deudor: cobro.deudor,
+    usuario: cobro.usuario,
+    fiados: cobro.detalles.map((detalle) => ({
+      idVenta: detalle.venta.idVenta,
+      numeroComprobante: detalle.venta.numeroComprobante,
+      monto: aDecimal(detalle.monto),
+    })),
+    pagos: cobro.pagos.map((pago) => ({
+      idMedioPago: pago.medioPago.idMedioPago,
+      nombreMedioPago: pago.medioPago.nombre,
+      montoBase: aDecimal(pago.montoBase),
+      porcentajeAplicado: aDecimal(pago.porcentajeAplicado),
+      montoFinal: aDecimal(pago.montoFinal),
+      // Nulos si el medio no es efectivo o no se informo el recibido
+      montoRecibido: pago.montoRecibido === null ? null : aDecimal(pago.montoRecibido),
+      vuelto: pago.vuelto === null ? null : aDecimal(pago.vuelto),
+    })),
+  };
 }

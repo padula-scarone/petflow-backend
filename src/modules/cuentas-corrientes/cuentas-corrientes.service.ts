@@ -11,18 +11,24 @@ import {
   formatearCentavos,
 } from "../ventas/ventas.service.js";
 import {
+  crearErrorCobroNoEncontrado,
   crearErrorFiadoNoEncontrado,
   crearErrorFiadoNoPendiente,
   crearErrorMontoExcedeFalta,
 } from "./cuentas-corrientes.errors.js";
 import {
+  buscarCobroPorId,
   buscarEstadoCuentaDeudor,
   buscarPaginaCuentasCorrientes,
   registrarCobroAtomico,
 } from "./cuentas-corrientes.repository.js";
+import { SENTIDO_ORDEN_PREDETERMINADO } from "./cuentas-corrientes.schemas.js";
 import type {
   CobroCalculado,
+  CobroLeido,
   CobroRegistrado,
+  ConsultarCobroInput,
+  ConsultarCobroResponse,
   ConsultarCuentasCorrientesInput,
   ConsultarCuentasCorrientesResponse,
   ConsultarEstadoCuentaInput,
@@ -33,10 +39,13 @@ import type {
   FiadoCobrado,
   FiadoCobradoCalculado,
   FiadoDeEstadoCuenta,
+  FiadoDeRecibo,
   FiadoLeido,
   FiltroCuentasCorrientes,
   LecturaCobro,
+  OrdenCuentasCorrientes,
   PagoDeCobro,
+  PagoDeFiado,
   RegistrarCobroInput,
   RegistrarCobroResponse,
 } from "./cuentas-corrientes.types.js";
@@ -51,17 +60,34 @@ function formatearImporte(importe: Decimal): string {
 // --- LISTADO DE DEUDORES CON SALDO ---
 
 /**
+ * Resuelve el orden pedido en la query. Sin `ordenarPor` no hay orden pedido (`undefined`): el repository aplica el de siempre.
+ * Con `ordenarPor` y sin `sentido` se usa `SENTIDO_ORDEN_PREDETERMINADO`. Que `sentido` no llegue solo ya lo rechazó el esquema.
+ * @param consulta Query ya validada por Zod.
+ */
+export function calcularOrdenCuentasCorrientes(consulta: ConsultarCuentasCorrientesInput): OrdenCuentasCorrientes | undefined {
+  if (consulta.ordenarPor === undefined) {
+    return undefined;
+  }
+  return { campo: consulta.ordenarPor, sentido: consulta.sentido ?? SENTIDO_ORDEN_PREDETERMINADO };
+}
+
+/**
  * Traduce la query al filtro del repository. Un texto vacío tras el recorte equivale a no filtrar
  * (el front lo manda así cuando el campo está limpio), igual que `textoCliente` en el historial de ventas.
  */
 export function calcularFiltroCuentasCorrientes(consulta: ConsultarCuentasCorrientesInput): FiltroCuentasCorrientes {
+  const orden = calcularOrdenCuentasCorrientes(consulta);
   return {
     incluirSinDeuda: consulta.incluirSinDeuda,
     ...(consulta.texto !== undefined && consulta.texto !== "" ? { texto: consulta.texto } : {}),
+    ...(orden !== undefined ? { orden } : {}),
   };
 }
 
-/** Convierte un deudor con saldo al formato de la respuesta: el saldo como texto con 2 decimales. */
+/**
+ * Convierte un deudor con saldo al formato de la respuesta: el saldo como texto con 2 decimales,
+ * `fiadoDesde` en ISO 8601 y la próxima fecha estimada tal como la entrega el repository (`AAAA-MM-DD`).
+ */
 function convertirFilaCuentaCorriente(fila: FilaCuentaCorriente): CuentaCorrienteListada {
   return {
     idDeudor: fila.idDeudor,
@@ -69,6 +95,8 @@ function convertirFilaCuentaCorriente(fila: FilaCuentaCorriente): CuentaCorrient
     dni: fila.dni,
     saldo: formatearImporte(fila.saldo),
     cantidadFiadosPendientes: fila.cantidadFiadosPendientes,
+    fiadoDesde: fila.fiadoDesde === null ? null : fila.fiadoDesde.toISOString(),
+    proximaFechaEstimadaPago: fila.proximaFechaEstimadaPago,
   };
 }
 
@@ -155,6 +183,15 @@ export function calcularEstadoCuenta(idDeudor: number, leido: EstadoCuentaLeido,
       importeAdeudado: formatearImporte(importeAdeudado),
       yaPagado: formatearImporte(yaPagado),
       falta: formatearImporte(falta),
+      // Mantienen el orden del repository (fecha del cobro ascendente); el monto es lo aplicado a ESTE fiado
+      pagos: fiado.pagos.map(
+        (pago): PagoDeFiado => ({
+          idCobroDeudor: pago.idCobroDeudor,
+          numeroRecibo: pago.numeroRecibo,
+          fechaHora: pago.fechaHora.toISOString(),
+          monto: formatearImporte(pago.monto),
+        }),
+      ),
     };
   });
 
@@ -324,5 +361,66 @@ export function armarRespuestaCobro(registrado: CobroRegistrado): RegistrarCobro
     totalAbonado: formatearImporte(calculo.totalAbonado),
     totalCobrado: formatearCentavos(totalCobradoCentavos),
     saldoDeudorDespues: formatearImporte(saldoDeudorDespues),
+  };
+}
+
+// ===== RECIBO DE UN COBRO =====
+
+/**
+ * Consulta el recibo de un cobro ya registrado. Solo lectura: no escribe nada ni toma el reloj, porque el recibo muestra
+ * lo que quedo guardado (la fecha del cobro es la guardada, no la de la consulta).
+ * @param entrada Parametro de ruta ya validado por Zod.
+ * @returns El recibo, con los mismos formatos de importes que el 201 del cobro.
+ * @throws {ErrorNegocioCobro} 404 `COBRO_NO_ENCONTRADO` si el cobro no existe. Se lanza como objeto puro, no como Error.
+ */
+export async function consultarCobro(entrada: ConsultarCobroInput): Promise<ConsultarCobroResponse> {
+  const cobro = await buscarCobroPorId(entrada.idCobroDeudor);
+  return armarReciboCobro(entrada.idCobroDeudor, cobro);
+}
+
+/**
+ * Arma el recibo de un cobro a partir de lo leido. Pura: no accede a la base ni al reloj.
+ * `totalCobrado` es la suma de los montos finales de los pagos (lo que pago el cliente, con recargos o descuentos), con Decimal
+ * exacto y sin pasar por `number`: es la misma definicion del 201 del cobro, asi que el recibo y el alta coinciden.
+ * Los importes salen en texto con 2 decimales; el porcentaje aplicado tambien (recargo positivo, descuento negativo).
+ * @param idCobroDeudor Id pedido (para el mensaje del 404).
+ * @param cobro Cobro leido, o `null` si no existe.
+ * @throws {ErrorNegocioCobro} 404 `COBRO_NO_ENCONTRADO` si el cobro no existe.
+ */
+export function armarReciboCobro(idCobroDeudor: number, cobro: CobroLeido | null): ConsultarCobroResponse {
+  if (cobro === null) {
+    throw crearErrorCobroNoEncontrado(idCobroDeudor);
+  }
+
+  const totalCobrado = cobro.pagos.reduce((suma, pago) => suma.plus(pago.montoFinal), new Decimal(0));
+
+  return {
+    exito: true,
+    cobro: {
+      idCobroDeudor: cobro.idCobroDeudor,
+      numeroRecibo: cobro.numeroRecibo,
+      fechaHora: cobro.fechaHora.toISOString(),
+    },
+    deudor: cobro.deudor,
+    usuario: cobro.usuario,
+    fiados: cobro.fiados.map(
+      (fiado): FiadoDeRecibo => ({
+        idVenta: fiado.idVenta,
+        numeroComprobante: fiado.numeroComprobante,
+        montoAbonado: formatearImporte(fiado.monto),
+      }),
+    ),
+    pagos: cobro.pagos.map(
+      (pago): PagoDeCobro => ({
+        idMedioPago: pago.idMedioPago,
+        nombreMedioPago: pago.nombreMedioPago,
+        montoBase: formatearImporte(pago.montoBase),
+        porcentajeAplicado: formatearImporte(pago.porcentajeAplicado),
+        montoFinal: formatearImporte(pago.montoFinal),
+        montoRecibido: pago.montoRecibido === null ? null : formatearImporte(pago.montoRecibido),
+        vuelto: pago.vuelto === null ? null : formatearImporte(pago.vuelto),
+      }),
+    ),
+    totalCobrado: formatearImporte(totalCobrado),
   };
 }
