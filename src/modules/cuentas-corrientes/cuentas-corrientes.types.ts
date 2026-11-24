@@ -79,10 +79,25 @@ export type FiadoLeido = {
   montosCobrados: Decimal[];
 };
 
+/** Un cobro aplicado a un fiado, tal como lo lee el estado de cuenta: cuándo, con qué recibo y cuánto se aplicó a ESE fiado. */
+export type PagoDeFiadoLeido = {
+  idCobroDeudor: number;
+  /** Se asigna en la misma transacción que crea el cobro, pero la columna es nullable: se informa tal cual está guardada. */
+  numeroRecibo: string | null;
+  fechaHora: Date;
+  /** Lo aplicado a este fiado (`detalles_cobro_deudor.monto`), no el total del cobro, que puede cubrir varios fiados. */
+  monto: Decimal;
+};
+
+/** Un fiado pendiente con el detalle de sus cobros, para el estado de cuenta. Los cobros ya vienen ordenados por fecha ascendente. */
+export type FiadoConPagosLeido = FiadoLeido & {
+  pagos: PagoDeFiadoLeido[];
+};
+
 /** Lo que lee el repository para el estado de cuenta: el deudor (o `null` si no existe) y sus fiados pendientes ya ordenados. */
 export type EstadoCuentaLeido = {
   deudor: Deudor | null;
-  fiados: FiadoLeido[];
+  fiados: FiadoConPagosLeido[];
 };
 
 // --- RESPUESTA HTTP ---
@@ -126,6 +141,17 @@ export type ConsultarCuentasCorrientesResponse = {
   paginacion: PaginacionCuentasCorrientes;
 };
 
+/** Un cobro aplicado a un fiado, en el estado de cuenta. El `monto` va como texto con 2 decimales. */
+export type PagoDeFiado = {
+  idCobroDeudor: number;
+  /** Número del recibo del cobro (`REC-` y 8 dígitos). */
+  numeroRecibo: string | null;
+  /** Instante del cobro, en ISO 8601. */
+  fechaHora: string;
+  /** Lo aplicado a ESTE fiado (no el total del cobro, que puede cubrir varios fiados). */
+  monto: string;
+};
+
 /** Un fiado pendiente en el estado de cuenta. Los importes van como texto con 2 decimales. */
 export type FiadoDeEstadoCuenta = {
   idVenta: number;
@@ -145,6 +171,11 @@ export type FiadoDeEstadoCuenta = {
   yaPagado: string;
   /** `importeAdeudado - yaPagado`. */
   falta: string;
+  /**
+   * Cobros aplicados a este fiado, del más viejo al más nuevo (`fechaHora` ascendente, desempate por `idCobroDeudor`).
+   * La suma de sus `monto` es `yaPagado`. Vacío si todavía no se cobró nada.
+   */
+  pagos: PagoDeFiado[];
 };
 
 /**

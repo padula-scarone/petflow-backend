@@ -14,6 +14,7 @@ import type {
   CobroRegistrado,
   EstadoCuentaLeido,
   FilaCuentaCorriente,
+  FiadoConPagosLeido,
   FiadoLeido,
   FiltroCuentasCorrientes,
   LecturaCobro,
@@ -41,6 +42,27 @@ const SELECCION_FIADO = {
 
 /** Fila de venta leida con `SELECCION_FIADO`. */
 type FiadoLeidoDePrisma = Prisma.VentaGetPayload<{ select: typeof SELECCION_FIADO }>;
+
+/**
+ * Lo mismo que `SELECCION_FIADO`, pero cada cobro trae ademas su id, su recibo y su fecha: solo lo usa el estado de cuenta, que
+ * los muestra. Es una seleccion aparte (y no se amplia la compartida) para que el cobro, que lee los fiados bloqueados, no
+ * cargue joins que no necesita. Los cobros van ordenados por fecha ascendente con desempate por id: `monto` sigue siendo lo
+ * aplicado a ESTE fiado (`detalles_cobro_deudor`), y la suma de los `monto` es el mismo `yaPagado` de siempre.
+ */
+const SELECCION_FIADO_CON_PAGOS = {
+  ...SELECCION_FIADO,
+  detallesCobroDeudor: {
+    orderBy: [{ cobro: { fechaHora: "asc" } }, { idCobroDeudor: "asc" }],
+    select: {
+      idCobroDeudor: true,
+      monto: true,
+      cobro: { select: { numeroRecibo: true, fechaHora: true } },
+    },
+  },
+} satisfies Prisma.VentaSelect;
+
+/** Fila de venta leida con `SELECCION_FIADO_CON_PAGOS`. */
+type FiadoConPagosDePrisma = Prisma.VentaGetPayload<{ select: typeof SELECCION_FIADO_CON_PAGOS }>;
 
 /**
  * Tiempo maximo de la transaccion del cobro, en milisegundos (el predeterminado de Prisma, escrito a proposito).
@@ -298,7 +320,7 @@ export async function buscarPaginaCuentasCorrientes(
 /**
  * Lee un deudor y sus fiados pendientes con lo ya cobrado de cada uno, en una sola foto de la base (`RepeatableRead`).
  * Un fiado es una venta `PENDIENTE_PAGO` con ese deudor: las `COMPLETADA` y las `ANULADA` no cuentan.
- * Los cobros de cada fiado van en el mismo `select` de la venta (sin consulta por fila).
+ * Los cobros de cada fiado (con su recibo y fecha) van en el mismo `select` de la venta (sin consulta por fila).
  * Orden fijo: del más viejo al más nuevo (`fechaHora` ascendente, desempate por `idVenta` ascendente).
  * @param idDeudor Id del deudor, ya validado.
  * @returns El deudor (o `null` si no existe: el service decide el 404) y sus fiados pendientes.
@@ -310,13 +332,13 @@ export async function buscarEstadoCuentaDeudor(idDeudor: number): Promise<Estado
       prisma.venta.findMany({
         where: { idDeudor, estado: "PENDIENTE_PAGO" },
         orderBy: [{ fechaHora: "asc" }, { idVenta: "asc" }],
-        select: SELECCION_FIADO,
+        select: SELECCION_FIADO_CON_PAGOS,
       }),
     ],
     { isolationLevel: "RepeatableRead" },
   );
 
-  return { deudor, fiados: fiados.map(convertirFiadoLeido) };
+  return { deudor, fiados: fiados.map(convertirFiadoConPagosLeido) };
 }
 
 // --- CONVERSION DE UN FIADO LEIDO ---
@@ -331,6 +353,22 @@ function convertirFiadoLeido(fiado: FiadoLeidoDePrisma): FiadoLeido {
     subtotalBruto: aDecimal(fiado.subtotalBruto),
     descuentoManual: aDecimal(fiado.descuentoManual),
     montosCobrados: fiado.detallesCobroDeudor.map((detalle) => aDecimal(detalle.monto)),
+  };
+}
+
+/**
+ * Convierte un fiado leido con sus cobros detallados: lo mismo que `convertirFiadoLeido` mas `pagos`.
+ * `montosCobrados` sale de los mismos detalles que `pagos`, asi que `yaPagado` y la suma de los `monto` coinciden por construccion.
+ */
+function convertirFiadoConPagosLeido(fiado: FiadoConPagosDePrisma): FiadoConPagosLeido {
+  return {
+    ...convertirFiadoLeido(fiado),
+    pagos: fiado.detallesCobroDeudor.map((detalle) => ({
+      idCobroDeudor: detalle.idCobroDeudor,
+      numeroRecibo: detalle.cobro.numeroRecibo,
+      fechaHora: detalle.cobro.fechaHora,
+      monto: aDecimal(detalle.monto),
+    })),
   };
 }
 

@@ -1700,8 +1700,38 @@ const fiadoDeEstadoCuenta = {
     importeAdeudado: { type: "string", example: "1500.00", description: "Subtotal bruto menos descuento manual de la venta" },
     yaPagado: { type: "string", example: "0.00", description: "Suma de lo cobrado hasta ahora de este fiado" },
     falta: { type: "string", example: "1500.00", description: "`importeAdeudado - yaPagado`" },
+    pagos: {
+      type: "array",
+      description:
+        "Cobros aplicados a este fiado, del más viejo al más nuevo (`fechaHora` ascendente, desempate por `idCobroDeudor`). " +
+        "La suma de sus `monto` es `yaPagado`. Vacío si todavía no se cobró nada",
+      items: {
+        type: "object",
+        properties: {
+          idCobroDeudor: { type: "integer", example: 4, description: "Sirve para consultar el recibo: `GET /api/cuentas-corrientes/cobros/{idCobroDeudor}`" },
+          numeroRecibo: { type: "string", nullable: true, example: "REC-00000004", description: "Recibo del cobro" },
+          fechaHora: { type: "string", format: "date-time", description: "Instante del cobro (ISO 8601)" },
+          monto: {
+            type: "string",
+            example: "500.00",
+            description: "Lo aplicado a ESTE fiado (no el total del cobro, que puede cubrir varios fiados), texto con 2 decimales",
+          },
+        },
+        required: ["idCobroDeudor", "numeroRecibo", "fechaHora", "monto"],
+      },
+    },
   },
-  required: ["idVenta", "numeroComprobante", "fechaHora", "fechaEstimadaPago", "vencido", "importeAdeudado", "yaPagado", "falta"],
+  required: [
+    "idVenta",
+    "numeroComprobante",
+    "fechaHora",
+    "fechaEstimadaPago",
+    "vencido",
+    "importeAdeudado",
+    "yaPagado",
+    "falta",
+    "pagos",
+  ],
 };
 
 /** Respuesta exitosa de `GET /api/cuentas-corrientes/{idDeudor}` (ver `EstadoCuentaResponse`). */
@@ -2652,6 +2682,7 @@ export const openapiDocument = {
           "Un deudor sin fiados pendientes devuelve 200 con saldo `0.00` y `fiados` vacío. " +
           "Cada fiado trae `fechaEstimadaPago` (`AAAA-MM-DD` o `null`) y `vencido`, calculado al consultar (no se guarda): " +
           "`true` si tiene fecha, es anterior a hoy en hora de Argentina y todavía falta pagar algo. La fecha es solo informativa y no cambia el saldo ni el orden. " +
+          "Cada fiado trae `pagos[]`: los cobros aplicados a ese fiado (`idCobroDeudor`, `numeroRecibo`, `fechaHora` y `monto`, que es lo aplicado a ESE fiado), por fecha ascendente; la suma de sus montos es `yaPagado`. " +
           "Solo lectura. Requiere sesión; pueden usarlo los tres roles (VENDEDOR, GESTOR_COMERCIAL y GERENTE) y no exige caja abierta.",
         parameters: [parametroIdDeudorEstadoCuenta],
         responses: {

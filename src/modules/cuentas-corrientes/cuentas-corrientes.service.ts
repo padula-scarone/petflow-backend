@@ -39,6 +39,7 @@ import type {
   LecturaCobro,
   OrdenCuentasCorrientes,
   PagoDeCobro,
+  PagoDeFiado,
   RegistrarCobroInput,
   RegistrarCobroResponse,
 } from "./cuentas-corrientes.types.js";
@@ -176,6 +177,15 @@ export function calcularEstadoCuenta(idDeudor: number, leido: EstadoCuentaLeido,
       importeAdeudado: formatearImporte(importeAdeudado),
       yaPagado: formatearImporte(yaPagado),
       falta: formatearImporte(falta),
+      // Mantienen el orden del repository (fecha del cobro ascendente); el monto es lo aplicado a ESTE fiado
+      pagos: fiado.pagos.map(
+        (pago): PagoDeFiado => ({
+          idCobroDeudor: pago.idCobroDeudor,
+          numeroRecibo: pago.numeroRecibo,
+          fechaHora: pago.fechaHora.toISOString(),
+          monto: formatearImporte(pago.monto),
+        }),
+      ),
     };
   });
 
