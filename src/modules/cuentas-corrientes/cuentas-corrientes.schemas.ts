@@ -30,6 +30,12 @@ export const SENTIDOS_ORDEN_CUENTAS_CORRIENTES = ["asc", "desc"] as const;
 /** Sentido que se aplica cuando llega `ordenarPor` sin `sentido`. */
 export const SENTIDO_ORDEN_PREDETERMINADO = "asc";
 
+/**
+ * Valores del filtro `proximoPago`, con mayúsculas exactas. Es una lista cerrada: el service la traduce a límites de fecha
+ * y el repository a fragmentos de SQL fijos (nunca se arma SQL con el texto recibido).
+ */
+export const FILTROS_PROXIMO_PAGO = ["hoy", "estaSemana", "vencidos", "sinFecha"] as const;
+
 // --- AUXILIARES ---
 
 /**
@@ -50,6 +56,8 @@ const booleanoDesdeTexto = z
  * `ordenarPor` y `sentido` son opcionales; sin ellos el orden es el de siempre (saldo descendente). `sentido` sin `ordenarPor`
  * es 400: ignorarlo en silencio haría creer al front que ordenó. Con `ordenarPor` y sin `sentido` se usa `SENTIDO_ORDEN_PREDETERMINADO`
  * (lo resuelve el service).
+ * `proximoPago` filtra por la fecha estimada de pago más temprana de los fiados pendientes (ver `FILTROS_PROXIMO_PAGO`). Es un
+ * enumerado estricto: un valor vacío o mal escrito es 400 (no se ignora en silencio, para que el front no crea que filtró).
  */
 export const consultarCuentasCorrientesSchema = z
   .object({
@@ -59,6 +67,7 @@ export const consultarCuentasCorrientesSchema = z
     incluirSinDeuda: booleanoDesdeTexto.default(false),
     ordenarPor: z.enum(CAMPOS_ORDEN_CUENTAS_CORRIENTES).optional(),
     sentido: z.enum(SENTIDOS_ORDEN_CUENTAS_CORRIENTES).optional(),
+    proximoPago: z.enum(FILTROS_PROXIMO_PAGO).optional(),
   })
   .superRefine((consulta, contexto) => {
     if (consulta.sentido !== undefined && consulta.ordenarPor === undefined) {

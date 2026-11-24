@@ -1,5 +1,5 @@
 import { Decimal, redondearAMoneda } from "../../shared/decimal.js";
-import { calcularHoyArgentina } from "../../shared/fecha-argentina.js";
+import { calcularDomingoDeLaSemana, calcularHoyArgentina } from "../../shared/fecha-argentina.js";
 import { calcularImporteAdeudado } from "../../shared/importe-adeudado.js";
 import { crearErrorDeudorNoEncontrado } from "../deudores/deudores.errors.js";
 import {
@@ -42,11 +42,13 @@ import type {
   FiadoDeRecibo,
   FiadoLeido,
   FiltroCuentasCorrientes,
+  FiltroProximoPago,
   LecturaCobro,
   OrdenCuentasCorrientes,
   PagoDeCobro,
   PagoDeFiado,
   RegistrarCobroInput,
+  ValorProximoPago,
   RegistrarCobroResponse,
 } from "./cuentas-corrientes.types.js";
 
@@ -72,14 +74,43 @@ export function calcularOrdenCuentasCorrientes(consulta: ConsultarCuentasCorrien
 }
 
 /**
+ * Resuelve el filtro `proximoPago` a fechas de calendario concretas, para que el repository no tenga lógica de calendario.
+ * "Hoy" sale de `calcularHoyArgentina`, el mismo helper con el que se marca un fiado como `vencido` en la ficha:
+ * así "vencidos" del listado y `vencido` de la ficha coinciden siempre (y a medianoche argentina cambian a la vez).
+ * - `hoy`: desde hoy hasta hoy.
+ * - `estaSemana`: desde hoy hasta el domingo de esta semana (lunes a domingo), ambos inclusive. No incluye vencidas;
+ *   si hoy es domingo, es solo hoy.
+ * - `vencidos`: anteriores a hoy (hoy no cuenta).
+ * - `sinFecha`: no necesita fechas.
+ * @param proximoPago Valor ya validado por Zod.
+ * @param ahora Instante actual del servidor (se inyecta para poder probar la función con fechas fijas).
+ */
+export function calcularFiltroProximoPago(proximoPago: ValorProximoPago, ahora: Date): FiltroProximoPago {
+  const hoy = calcularHoyArgentina(ahora);
+  switch (proximoPago) {
+    case "hoy":
+      return { tipo: "hoy", fechaDesde: hoy, fechaHasta: hoy };
+    case "estaSemana":
+      return { tipo: "estaSemana", fechaDesde: hoy, fechaHasta: calcularDomingoDeLaSemana(hoy) };
+    case "vencidos":
+      return { tipo: "vencidos", fechaAntesDe: hoy };
+    case "sinFecha":
+      return { tipo: "sinFecha" };
+  }
+}
+
+/**
  * Traduce la query al filtro del repository. Un texto vacío tras el recorte equivale a no filtrar
  * (el front lo manda así cuando el campo está limpio), igual que `textoCliente` en el historial de ventas.
+ * @param consulta Query ya validada por Zod.
+ * @param ahora Instante actual del servidor: define "hoy" en Argentina para el filtro `proximoPago`.
  */
-export function calcularFiltroCuentasCorrientes(consulta: ConsultarCuentasCorrientesInput): FiltroCuentasCorrientes {
+export function calcularFiltroCuentasCorrientes(consulta: ConsultarCuentasCorrientesInput, ahora: Date): FiltroCuentasCorrientes {
   const orden = calcularOrdenCuentasCorrientes(consulta);
   return {
     incluirSinDeuda: consulta.incluirSinDeuda,
     ...(consulta.texto !== undefined && consulta.texto !== "" ? { texto: consulta.texto } : {}),
+    ...(consulta.proximoPago !== undefined ? { proximoPago: calcularFiltroProximoPago(consulta.proximoPago, ahora) } : {}),
     ...(orden !== undefined ? { orden } : {}),
   };
 }
@@ -104,12 +135,14 @@ function convertirFilaCuentaCorriente(fila: FilaCuentaCorriente): CuentaCorrient
  * Consulta una página del listado de deudores con su saldo.
  * El saldo, el filtro de saldo, el orden y la paginación los resuelve el repository en la base; acá solo se arma la respuesta.
  * @param consulta Query ya validada por Zod (con los valores por defecto aplicados).
+ * @param ahora Instante actual (por defecto el reloj del servidor): define "hoy" en Argentina para el filtro `proximoPago`.
  * @returns Los deudores de la página y los metadatos de paginación. Una página fuera de rango devuelve lista vacía.
  */
 export async function consultarCuentasCorrientes(
   consulta: ConsultarCuentasCorrientesInput,
+  ahora: Date = new Date(),
 ): Promise<ConsultarCuentasCorrientesResponse> {
-  const filtro = calcularFiltroCuentasCorrientes(consulta);
+  const filtro = calcularFiltroCuentasCorrientes(consulta, ahora);
   const desplazamiento = calcularDesplazamiento(consulta.pagina, consulta.cantidadPorPagina);
 
   const paginaEncontrada = await buscarPaginaCuentasCorrientes(filtro, desplazamiento, consulta.cantidadPorPagina);

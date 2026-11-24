@@ -1677,6 +1677,13 @@ const descripcionesParametrosCuentasCorrientes: Record<string, string> = {
   sentido:
     "`asc` o `desc` (en minúsculas). Solo se admite junto con `ordenarPor` (solo, da 400). " +
     `Con \`ordenarPor\` y sin \`sentido\` se usa \`${SENTIDO_ORDEN_PREDETERMINADO}\`.`,
+  proximoPago:
+    "Filtra por `proximaFechaEstimadaPago` (la fecha estimada más temprana entre los fiados pendientes, incluidas las vencidas). " +
+    "Distingue mayúsculas; otro valor, incluido el vacío, da 400. Omitido no filtra. \"Hoy\" es la fecha de Argentina (UTC-3), la misma de `vencido` en la ficha. " +
+    "`hoy`: la fecha es hoy. `estaSemana`: desde hoy hasta el domingo de esta semana (lunes a domingo), ambos inclusive; no incluye vencidas " +
+    "(si hoy es domingo, solo hoy). `vencidos`: la fecha es anterior a hoy. `sinFecha`: tiene fiados pendientes pero ninguno con fecha estimada. " +
+    "Con `proximoPago` solo salen deudores con al menos un fiado pendiente, sin importar `incluirSinDeuda`. " +
+    "Se combina con `texto`, `ordenarPor`, `sentido`, `pagina` y `cantidadPorPagina`; `totalRegistros` y `totalPaginas` reflejan el filtro.",
 };
 
 // Los parámetros se derivan del esquema Zod real, igual que los del historial, para que no se desactualicen
@@ -2776,7 +2783,7 @@ export const openapiDocument = {
           "(el orden alfabético depende de la intercalación de la base). Con `ordenarPor` (y `sentido`) se ordena por esa columna; " +
           "los nulos van siempre al final y el desempate sigue siendo nombre e id ascendentes. " +
           "Cada deudor trae `fiadoDesde` (su fiado pendiente más antiguo) y `proximaFechaEstimadaPago` (la fecha estimada más temprana entre sus fiados pendientes), nulos si no aplican. " +
-          "No hay filtro por próximo pago: lo resuelve el front. `texto` busca por nombre completo (parcial, sin distinguir mayúsculas) o por DNI. " +
+          "`proximoPago` (`hoy`, `estaSemana`, `vencidos` o `sinFecha`) filtra por esa fecha en la base y solo trae deudores con fiados pendientes. `texto` busca por nombre completo (parcial, sin distinguir mayúsculas) o por DNI. " +
           "Una página fuera de rango devuelve 200 con lista vacía y el `totalRegistros` real. La lista y el total salen de la misma foto de la base. " +
           "Solo lectura. Requiere sesión; pueden usarlo los tres roles (VENDEDOR, GESTOR_COMERCIAL y GERENTE) y no exige caja abierta.",
         parameters: parametrosCuentasCorrientes,
@@ -2788,7 +2795,7 @@ export const openapiDocument = {
           "400": {
             description:
               "Parámetros de consulta inválidos (formato, rango, `texto` de más de 100 caracteres, `incluirSinDeuda` distinto de `true` o `false`, " +
-              "`ordenarPor` o `sentido` con un valor no admitido, o `sentido` sin `ordenarPor`)",
+              "`ordenarPor`, `sentido` o `proximoPago` con un valor no admitido (incluido vacío), o `sentido` sin `ordenarPor`)",
             content: { "application/json": { schema: errorValidacionConsulta } },
           },
           ...respuestasProteccion,
